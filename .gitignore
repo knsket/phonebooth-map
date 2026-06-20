@@ -1,0 +1,9 @@
+.env
+.env.local
+__pycache__/
+*.pyc
+.DS_Store
+scripts/.geocode_cache.json
+scripts/.places_cache.json
+scripts/.reverse_geocode_cache.json
+node_modules
