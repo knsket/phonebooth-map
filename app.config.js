@@ -25,6 +25,9 @@ module.exports = {
         android: {
           kotlinVersion: '1.9.25',
         },
+        ios: {
+          deploymentTarget: '15.1',
+        },
       },
     ],
     [

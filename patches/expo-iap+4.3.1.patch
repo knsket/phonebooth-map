@@ -1,0 +1,52 @@
+diff --git a/node_modules/expo-iap/android/src/main/java/expo/modules/iap/ExpoIapModule.kt b/node_modules/expo-iap/android/src/main/java/expo/modules/iap/ExpoIapModule.kt
+index 2f08fb9..8693e38 100644
+--- a/node_modules/expo-iap/android/src/main/java/expo/modules/iap/ExpoIapModule.kt
++++ b/node_modules/expo-iap/android/src/main/java/expo/modules/iap/ExpoIapModule.kt
+@@ -71,9 +71,7 @@ class ExpoIapModule : Module() {
+         ModuleDefinition {
+             Name("ExpoIap")
+ 
+-            Constant("ERROR_CODES") {
+-                OpenIapError.getAllErrorCodes()
+-            }
++            Constants("ERROR_CODES" to OpenIapError.getAllErrorCodes())
+ 
+             Events(
+                 EVENT_PURCHASE_UPDATED,
+diff --git a/node_modules/expo-iap/ios/ExpoIapModule.swift b/node_modules/expo-iap/ios/ExpoIapModule.swift
+index c6e7a2e..e7d6fb7 100644
+--- a/node_modules/expo-iap/ios/ExpoIapModule.swift
++++ b/node_modules/expo-iap/ios/ExpoIapModule.swift
+@@ -14,8 +14,8 @@ public final class ExpoIapModule: Module {
+     nonisolated public func definition() -> ModuleDefinition {
+         Name("ExpoIap")
+ 
+-        Constant("ERROR_CODES") {
+-            OpenIapSerialization.errorCodes()
++        Constants {
++            return ["ERROR_CODES": OpenIapSerialization.errorCodes()]
+         }
+ 
+         Events(
+diff --git a/node_modules/expo-iap/ios/onside/OnsideIapModule.swift b/node_modules/expo-iap/ios/onside/OnsideIapModule.swift
+index cf6f7d7..4622c23 100644
+--- a/node_modules/expo-iap/ios/onside/OnsideIapModule.swift
++++ b/node_modules/expo-iap/ios/onside/OnsideIapModule.swift
+@@ -670,12 +670,11 @@ public final class ExpoIapOnsideModule: Module {
+     nonisolated public func definition() -> ModuleDefinition {
+         Name("ExpoIapOnside")
+ 
+-        Constant("ERROR_CODES") {
+-            OpenIapSerialization.errorCodes()
+-        }
+-
+-        Constant("IS_ONSIDE_KIT_INSTALLED_IOS") {
+-            false
++        Constants {
++            return [
++                "ERROR_CODES": OpenIapSerialization.errorCodes(),
++                "IS_ONSIDE_KIT_INSTALLED_IOS": false
++            ]
+         }
+ 
+         Events(
