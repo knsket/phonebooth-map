@@ -1,5 +1,6 @@
 .env
 .env.local
+.expo/
 __pycache__/
 *.pyc
 .DS_Store
@@ -7,3 +8,11 @@ scripts/.geocode_cache.json
 scripts/.places_cache.json
 scripts/.reverse_geocode_cache.json
 node_modules
+dist/
+web-build/
+*.tsbuildinfo
+
+# ストア送信用認証情報（絶対にコミットしない）
+credentials/
+*.p8
+google-service-account.json

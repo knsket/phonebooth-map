@@ -1,0 +1,41 @@
+{
+  "cli": {
+    "version": ">= 13.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "image": "macos-sequoia-15.6-xcode-26.2"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "ios": {
+        "image": "macos-sequoia-15.6-xcode-26.2"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "ios": {
+        "image": "macos-sequoia-15.6-xcode-26.2"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascApiKeyPath": "./credentials/ios/AuthKey.p8",
+        "ascApiKeyId": "PBB7Z88JMC",
+        "ascApiKeyIssuerId": "69a6de72-ad53-47e3-e053-5b8c7c11a4d1",
+        "ascAppId": "6782357601"
+      },
+      "android": {
+        "serviceAccountKeyPath": "./credentials/android/google-service-account.json",
+        "track": "internal"
+      }
+    }
+  }
+}

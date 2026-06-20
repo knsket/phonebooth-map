@@ -12,38 +12,16 @@ import {
   Platform,
   SafeAreaView,
   ActivityIndicator,
-  Modal,
   Keyboard,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 
 import BoothMap from './src/components/BoothMap';
-import boothsData from './src/data/booths.json';
-
-interface Booth {
-  id: string;
-  brand: string;
-  company: string;
-  name: string;
-  prefecture: string;
-  address: string;
-  station: string;
-  details: string;
-  hours: string;
-  count: string;
-  price: string;
-  url: string;
-  latitude: number;
-  longitude: number;
-}
-
-// 規約上の都合で非表示にするブランド(前方一致)。ここに追加すると地図・リスト・検索・フィルタ全てから除外される。
-const EXCLUDED_BRAND_PREFIXES = ['EXPRESS WORK'];
-
-const BOOTHS = (boothsData as Booth[]).filter(
-  (b) => !EXCLUDED_BRAND_PREFIXES.some((p) => b.brand.startsWith(p))
-);
+import Paywall from './src/components/Paywall';
+import { useSubscription, planLabel, PlanId } from './src/lib/subscription';
+import { Booth, LOCAL_BOOTHS, fetchAllBooths, BoothSource } from './src/lib/boothsRepo';
+import { getBrandColor } from './src/lib/brands';
 
 // 東京駅周辺
 const INITIAL_REGION = {
@@ -52,19 +30,6 @@ const INITIAL_REGION = {
   latitudeDelta: 0.02,
   longitudeDelta: 0.02,
 };
-
-// データに実在する6ブランドに対応した配色
-const BRAND_COLORS: { [key: string]: string } = {
-  'STATION BOOTH': '#F59E0B',
-  'テレキューブ': '#10B981',
-  'CHATBOX': '#8B5CF6',
-  'CocoDesk': '#3B82F6',
-  'EXPRESS WORK-Booth': '#EF4444',
-  'EXPRESS WORK-Lounge': '#EC4899',
-};
-const DEFAULT_BRAND_COLOR = '#6B7280';
-
-const getBrandColor = (brand: string) => BRAND_COLORS[brand] || DEFAULT_BRAND_COLOR;
 
 // 2点間の距離(おおまかなkm。表示用)
 const distanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
@@ -78,17 +43,27 @@ const distanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
 };
 
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  // サブスクリプション(課金)状態。徒歩案内・予約リンクをアンロックする。
+  const { entitlement, purchasing, purchase, restore, clear, redeemCoupon } = useSubscription();
+  const isPremium = entitlement.active;
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [paywallContext, setPaywallContext] = useState<string | undefined>(undefined);
+  // 課金完了後に自動で続行するアクション(ルート表示/予約遷移)
+  const pendingActionRef = useRef<null | (() => void)>(null);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedBooth, setSelectedBooth] = useState<Booth | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [showAuthErrorModal, setShowAuthErrorModal] = useState(false);
   const [filterBrand, setFilterBrand] = useState<string>('ALL');
   const [appMode, setAppMode] = useState<'MAP' | 'LIST'>('MAP');
   // 徒歩ルート表示中かどうか(Web地図に現在地→ブースの線を描く)
   const [routeActive, setRouteActive] = useState(false);
   // 実ルートの距離・時間(歩行者ルーティングの結果)
   const [routeInfo, setRouteInfo] = useState<{ mode: string; meters: number | null; seconds: number | null } | null>(null);
+
+  // ブースデータ(Supabase優先・ローカルfallback)。初期はバンドル済みローカルで即描画し、取得後に差し替える。
+  const [allBooths, setAllBooths] = useState<Booth[]>(LOCAL_BOOTHS);
+  const [dataSource, setDataSource] = useState<BoothSource>('local');
 
   // 自分の現在地(青い点でマッピング)。取得できるまでは null。
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -101,6 +76,19 @@ export default function App() {
   });
 
   const mapRef = useRef<any>(null);
+
+  // 起動時にSupabaseから全ブースを取得(失敗時はローカルのまま)。
+  useEffect(() => {
+    let cancelled = false;
+    fetchAllBooths().then(({ booths, source }) => {
+      if (cancelled) return;
+      setAllBooths(booths);
+      setDataSource(source);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 起動時に一度だけ現在地へ寄せる。許可されていない/取得失敗時は東京駅(INITIAL_REGION)のまま。
   useEffect(() => {
@@ -146,21 +134,21 @@ export default function App() {
   // ブランド一覧(件数つき・多い順)
   const brandChips = useMemo(() => {
     const counts = new Map<string, number>();
-    BOOTHS.forEach((b) => {
+    allBooths.forEach((b) => {
       if (b.brand) counts.set(b.brand, (counts.get(b.brand) || 0) + 1);
     });
     const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
     return [
-      { key: 'ALL', label: 'すべて', count: BOOTHS.length },
+      { key: 'ALL', label: 'すべて', count: allBooths.length },
       ...sorted.map(([key, count]) => ({ key, label: key, count })),
     ];
-  }, []);
+  }, [allBooths]);
 
   // マップ表示用: 実際に画面に映っている範囲 + ブランド絞り込み。
   // latitudeDelta/longitudeDelta は「表示範囲の全幅」なので、中心から半分(+10%の余白)が画面内。
   // これによりズーム拡大→件数減、縮小→件数増、と直感どおりに連動する。
   const visibleBooths = useMemo(() => {
-    let list = BOOTHS;
+    let list = allBooths;
     if (filterBrand !== 'ALL') list = list.filter((b) => b.brand === filterBrand);
 
     const thLat = (mapRegion.latitudeDelta / 2) * 1.1;
@@ -174,11 +162,11 @@ export default function App() {
         );
       })
       .slice(0, 300);
-  }, [mapRegion, filterBrand, selectedBooth]);
+  }, [allBooths, mapRegion, filterBrand, selectedBooth]);
 
   // リスト表示用: ブランド絞り込み + アンカーから近い順
   const listBooths = useMemo(() => {
-    let list = BOOTHS;
+    let list = allBooths;
     if (filterBrand !== 'ALL') list = list.filter((b) => b.brand === filterBrand);
     return [...list]
       .map((b) => ({
@@ -187,7 +175,7 @@ export default function App() {
       }))
       .sort((a, b) => a.dist - b.dist)
       .slice(0, 100);
-  }, [filterBrand, listAnchor]);
+  }, [allBooths, filterBrand, listAnchor]);
 
   // 詳細シートを閉じる(ルート表示もリセット)
   const closeSheet = () => {
@@ -205,8 +193,54 @@ export default function App() {
     return { minutes, distLabel };
   };
 
-  // 「徒歩ルート」ボタン: Webは地図に線を描画、ネイティブは外部Googleマップ徒歩ナビ
+  // プレミアム機能のゲート。未課金ならペイウォールを開き、課金後に続行する。
+  const requirePremium = (context: string, action: () => void): boolean => {
+    if (isPremium) return true;
+    pendingActionRef.current = action;
+    setPaywallContext(context);
+    setShowPaywall(true);
+    return false;
+  };
+
+  // ペイウォールからの購入完了処理
+  const handlePurchase = async (planId: PlanId) => {
+    const ok = await purchase(planId);
+    if (ok) {
+      setShowPaywall(false);
+      const next = pendingActionRef.current;
+      pendingActionRef.current = null;
+      if (next) setTimeout(next, 250); // 課金完了後に元の操作を続行
+    }
+  };
+
+  // クーポン適用。成功したらペイウォールを閉じ、保留中の操作を続行する。
+  const handleRedeemCoupon = async (code: string) => {
+    const result = await redeemCoupon(code);
+    if (result.success) {
+      const next = pendingActionRef.current;
+      pendingActionRef.current = null;
+      setTimeout(() => {
+        setShowPaywall(false);
+        if (next) setTimeout(next, 250);
+      }, 900); // 成功メッセージを一瞬見せてから閉じる
+    }
+    return result;
+  };
+
+  const handleRestore = async () => {
+    const ok = await restore();
+    if (ok) {
+      setShowPaywall(false);
+      Alert.alert('復元しました', 'プレミアム機能が有効になりました。');
+    } else {
+      Alert.alert('購入履歴なし', '復元できる購入が見つかりませんでした。');
+    }
+  };
+
+  // 「徒歩ルート」ボタン: プレミアム機能。Webは地図に線を描画、ネイティブは外部Googleマップ徒歩ナビ
   const handleRoutePress = (booth: Booth) => {
+    // 未課金なら課金を促し、購入後にこの操作を自動継続
+    if (!requirePremium('徒歩ルート案内', () => handleRoutePress(booth))) return;
     if (Platform.OS !== 'web') {
       openExternalWalkNav(booth);
       return;
@@ -335,7 +369,7 @@ export default function App() {
     if (!q) return;
     Keyboard.dismiss();
 
-    const results = BOOTHS.filter(
+    const results = allBooths.filter(
       (b) =>
         b.address.toLowerCase().includes(q) ||
         b.name.toLowerCase().includes(q) ||
@@ -353,10 +387,8 @@ export default function App() {
   };
 
   const handleOpenBooking = (booth: Booth) => {
-    if (!isLoggedIn) {
-      setShowAuthErrorModal(true);
-      return;
-    }
+    // 予約ページへのリンクはプレミアム機能。未課金なら課金を促す。
+    if (!requirePremium('予約ページへのリンク', () => handleOpenBooking(booth))) return;
     if (Platform.OS === 'web') {
       window.open(booth.url, '_blank');
     } else {
@@ -383,16 +415,27 @@ export default function App() {
         <View style={styles.headerRow}>
           <View>
             <Text style={styles.headerTitle}>フォンブースマップ</Text>
-            <Text style={styles.headerSub}>全国 {BOOTHS.length.toLocaleString()} 拠点の個室ブースを探す</Text>
+            <Text style={styles.headerSub}>
+              全国 {allBooths.length.toLocaleString()} 拠点{dataSource === 'supabase' ? '' : '（ローカル）'}
+            </Text>
           </View>
           <TouchableOpacity
-            style={[styles.authPill, isLoggedIn ? styles.authPillOn : styles.authPillOff]}
-            onPress={() => setIsLoggedIn((v) => !v)}
+            style={[styles.authPill, isPremium ? styles.authPillOn : styles.authPillOff]}
+            onPress={() => {
+              if (isPremium) {
+                Alert.alert('プレミアム会員', `現在のプラン: ${planLabel(entitlement.plan)}`, [
+                  { text: '解約する（デモ）', style: 'destructive', onPress: clear },
+                  { text: '閉じる', style: 'cancel' },
+                ]);
+              } else {
+                setPaywallContext(undefined);
+                setShowPaywall(true);
+              }
+            }}
             activeOpacity={0.8}
           >
-            <View style={[styles.authDot, { backgroundColor: isLoggedIn ? '#10B981' : '#9CA3AF' }]} />
-            <Text style={[styles.authPillText, { color: isLoggedIn ? '#065F46' : '#6B7280' }]}>
-              {isLoggedIn ? 'ログイン中' : 'ゲスト'}
+            <Text style={[styles.authPillText, { color: isPremium ? '#92400E' : '#6B7280' }]}>
+              {isPremium ? `⭐ ${planLabel(entitlement.plan)}` : '🔒 無料プラン'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -584,7 +627,7 @@ export default function App() {
               onPress={() => handleOpenBooking(selectedBooth)}
               activeOpacity={0.9}
             >
-              <Text style={styles.bookBtnSmText}>{isLoggedIn ? '⚡ 予約' : '🔒 予約'}</Text>
+              <Text style={styles.bookBtnSmText}>{isPremium ? '⚡ 予約' : '🔒 予約'}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -652,14 +695,19 @@ export default function App() {
                 activeOpacity={0.9}
               >
                 <Text style={[styles.routeBtnText, routeActive && styles.routeBtnTextActive]}>
-                  {Platform.OS === 'web'
+                  {!isPremium
+                    ? '🔒 徒歩ルート'
+                    : Platform.OS === 'web'
                     ? (routeActive ? '🧭 ルートを消す' : '🧭 徒歩ルート')
                     : '🧭 徒歩でナビ'}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.navBtn}
-                onPress={() => openExternalWalkNav(selectedBooth)}
+                onPress={() => {
+                  if (!requirePremium('徒歩ルート案内', () => openExternalWalkNav(selectedBooth))) return;
+                  openExternalWalkNav(selectedBooth);
+                }}
                 activeOpacity={0.9}
               >
                 <Text style={styles.navBtnText}>Googleマップ</Text>
@@ -672,38 +720,26 @@ export default function App() {
               activeOpacity={0.9}
             >
               <Text style={styles.bookBtnText}>
-                {isLoggedIn ? '⚡ 予約サイトを開く' : '🔒 予約する（ログインが必要）'}
+                {isPremium ? '⚡ 予約サイトを開く' : '🔒 予約する（プレミアム機能）'}
               </Text>
             </TouchableOpacity>
           </View>
         </>
       )}
 
-      {/* ===== 未ログインエラー ===== */}
-      <Modal animationType="fade" transparent visible={showAuthErrorModal} onRequestClose={() => setShowAuthErrorModal(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalIcon}><Text style={{ fontSize: 30 }}>🔒</Text></View>
-            <Text style={styles.modalTitle}>ログインしてください</Text>
-            <Text style={styles.modalSub}>
-              予約機能のご利用にはログインが必要です。ログイン後に予約サイトへ進めます。
-            </Text>
-            <TouchableOpacity
-              style={styles.modalPrimary}
-              onPress={() => {
-                setIsLoggedIn(true);
-                setShowAuthErrorModal(false);
-                if (selectedBooth) setTimeout(() => handleOpenBooking(selectedBooth), 350);
-              }}
-            >
-              <Text style={styles.modalPrimaryText}>デモアカウントでログイン</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.modalSecondary} onPress={() => setShowAuthErrorModal(false)}>
-              <Text style={styles.modalSecondaryText}>閉じる</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+      {/* ===== ペイウォール(課金) ===== */}
+      <Paywall
+        visible={showPaywall}
+        purchasing={purchasing}
+        context={paywallContext}
+        onPurchase={handlePurchase}
+        onRestore={handleRestore}
+        onRedeemCoupon={handleRedeemCoupon}
+        onClose={() => {
+          setShowPaywall(false);
+          pendingActionRef.current = null;
+        }}
+      />
 
       {isLoading && (
         <View style={styles.loader}>
@@ -745,10 +781,9 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
   },
-  authPillOn: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
+  authPillOn: { backgroundColor: '#FEF3C7', borderColor: '#FCD34D' },
   authPillOff: { backgroundColor: '#F9FAFB', borderColor: '#E5E7EB' },
-  authDot: { width: 7, height: 7, borderRadius: 4, marginRight: 6 },
-  authPillText: { fontSize: 12, fontWeight: '700' },
+  authPillText: { fontSize: 12, fontWeight: '800' },
 
   searchBar: {
     flexDirection: 'row',
@@ -983,17 +1018,6 @@ const styles = StyleSheet.create({
   },
   bookBtnSm: { width: 110, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   bookBtnSmText: { color: '#fff', fontSize: 14, fontWeight: '800' },
-
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(15,23,42,0.5)', justifyContent: 'center', alignItems: 'center', padding: 28 },
-  modalCard: { backgroundColor: '#fff', borderRadius: 22, padding: 26, width: '100%', maxWidth: 380, alignItems: 'center' },
-  modalIcon: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#FEF2F2', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
-  modalTitle: { fontSize: 19, fontWeight: '800', color: '#0F172A', marginBottom: 8 },
-  modalSub: { fontSize: 13, color: '#64748B', textAlign: 'center', lineHeight: 20, marginBottom: 20 },
-  modalPrimary: { backgroundColor: '#2563EB', height: 48, borderRadius: 14, width: '100%', alignItems: 'center', justifyContent: 'center', marginBottom: 8 },
-  modalPrimaryText: { color: '#fff', fontSize: 14, fontWeight: '800' },
-  modalSecondary: { height: 44, width: '100%', alignItems: 'center', justifyContent: 'center' },
-  modalSecondaryText: { color: '#94A3B8', fontSize: 14, fontWeight: '700' },
 
   loader: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.7)', alignItems: 'center', justifyContent: 'center', zIndex: 50 },
   loaderText: { marginTop: 12, fontSize: 13, fontWeight: '800', color: '#2563EB' },
