@@ -1,0 +1,3 @@
+# CNG: EAS Build 側で prebuild するためローカルのネイティブディレクトリは除外
+android/
+ios/

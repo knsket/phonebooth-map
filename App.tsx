@@ -13,6 +13,7 @@ import {
   SafeAreaView,
   ActivityIndicator,
   Keyboard,
+  InteractionManager,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
@@ -203,14 +204,28 @@ export default function App() {
   };
 
   // ペイウォールからの購入完了処理
-  const handlePurchase = async (planId: PlanId) => {
+  const completePurchase = async (planId: PlanId) => {
     const ok = await purchase(planId);
     if (ok) {
-      setShowPaywall(false);
       const next = pendingActionRef.current;
       pendingActionRef.current = null;
-      if (next) setTimeout(next, 250); // 課金完了後に元の操作を続行
+      if (next) setTimeout(next, 250);
+    } else {
+      // キャンセル時はペイウォールを戻す
+      setShowPaywall(true);
     }
+  };
+
+  const handlePurchase = (planId: PlanId) => {
+    if (Platform.OS === 'web') {
+      void completePurchase(planId);
+      return;
+    }
+    // iOS/Android: StoreKit・Play Billing は RN Modal の上から present できない
+    setShowPaywall(false);
+    InteractionManager.runAfterInteractions(() => {
+      setTimeout(() => completePurchase(planId), 450);
+    });
   };
 
   // クーポン適用。成功したらペイウォールを閉じ、保留中の操作を続行する。
@@ -228,12 +243,16 @@ export default function App() {
   };
 
   const handleRestore = async () => {
+    if (Platform.OS !== 'web') {
+      setShowPaywall(false);
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    }
     const ok = await restore();
     if (ok) {
-      setShowPaywall(false);
       Alert.alert('復元しました', 'プレミアム機能が有効になりました。');
     } else {
       Alert.alert('購入履歴なし', '復元できる購入が見つかりませんでした。');
+      if (Platform.OS !== 'web') setShowPaywall(true);
     }
   };
 
@@ -741,6 +760,15 @@ export default function App() {
         }}
       />
 
+      {purchasing && !showPaywall && (
+        <View style={styles.purchasingOverlay} pointerEvents="box-none">
+          <View style={styles.purchasingBox}>
+            <ActivityIndicator size="large" color="#2563EB" />
+            <Text style={styles.purchasingText}>購入処理中…</Text>
+          </View>
+        </View>
+      )}
+
       {isLoading && (
         <View style={styles.loader}>
           <ActivityIndicator size="large" color="#2563EB" />
@@ -1021,4 +1049,20 @@ const styles = StyleSheet.create({
 
   loader: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.7)', alignItems: 'center', justifyContent: 'center', zIndex: 50 },
   loaderText: { marginTop: 12, fontSize: 13, fontWeight: '800', color: '#2563EB' },
+  purchasingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15,23,42,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 60,
+  },
+  purchasingBox: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    paddingHorizontal: 28,
+    paddingVertical: 22,
+    alignItems: 'center',
+    minWidth: 160,
+  },
+  purchasingText: { marginTop: 12, fontSize: 13, fontWeight: '800', color: '#334155' },
 });
