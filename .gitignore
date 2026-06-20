@@ -12,6 +12,10 @@ dist/
 web-build/
 *.tsbuildinfo
 
+# expo prebuild / EAS Build が生成するネイティブプロジェクト（CNG）
+android/
+ios/
+
 # ストア送信用認証情報（絶対にコミットしない）
 credentials/
 *.p8
