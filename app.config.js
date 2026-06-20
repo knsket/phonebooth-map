@@ -19,6 +19,7 @@ module.exports = {
     backgroundColor: '#E8F4FD',
   },
   plugins: [
+    './plugins/withKotlinMetadataFix',
     [
       'expo-build-properties',
       {
