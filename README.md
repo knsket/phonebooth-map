@@ -198,8 +198,10 @@ python3 scripts/fill_address.py
 ```bash
 python3 scripts/fill_station.py --dry-run
 python3 scripts/fill_station.py --limit 50 --dry-run
+python3 scripts/fill_station.py --missing-label 最寄り駅なし --far-distance-km 30
 python3 scripts/fill_station.py
 ```
 
 - APIを使わない確認: `python3 scripts/fill_station.py --dry-run --no-google`
 - 採用しきい値を上げる: `python3 scripts/fill_station.py --min-score 80`
+- 鉄道駅が見つからない/遠距離時の文言付与: `--missing-label 最寄り駅なし --far-distance-km 30`

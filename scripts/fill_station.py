@@ -7,10 +7,14 @@
   2. 1で確信度が不足する場合のみ Google API で補完
      - Reverse Geocoding (result_type=train/subway/transit_station)
      - Places Nearby Search (type=train_station / subway_station)
+  3. 必要なら「最寄り駅なし」ラベルを自動付与
+     - Google検索で鉄道駅候補がない
+     - 最寄り鉄道駅までの距離が閾値(数十km)以上
 
 使い方:
   python3 scripts/fill_station.py --dry-run
   python3 scripts/fill_station.py --limit 50 --dry-run
+  python3 scripts/fill_station.py --missing-label 最寄り駅なし --far-distance-km 30
   python3 scripts/fill_station.py --limit 20
   python3 scripts/fill_station.py
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import re
 import sys
@@ -86,6 +91,16 @@ def canonical_station_name(name: str) -> str:
     text = re.sub(r"^(?:JR|ＪＲ)\s*", "", text)
     text = re.sub(r"\s+", "", text)
     return text
+
+
+def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius = 6371000
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlng / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(a))
 
 
 def extract_station_tokens(text: str) -> list[str]:
@@ -221,15 +236,23 @@ def infer_from_google(
     cache: dict[str, dict],
     cache_path: Path,
     delay: float,
-) -> tuple[dict[str, int], dict[str, set[str]], int]:
+) -> tuple[dict[str, int], dict[str, set[str]], int, dict[str, float | str | None]]:
     lat = row.get("緯度", "").strip()
     lng = row.get("経度", "").strip()
     if not lat or not lng:
-        return {}, {}, 0
+        return {}, {}, 0, {"nearest_rail_m": None, "nearest_rail_name": None}
+
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except ValueError:
+        return {}, {}, 0, {"nearest_rail_m": None, "nearest_rail_name": None}
 
     score_map: dict[str, int] = {}
     source_map: dict[str, set[str]] = {}
     api_calls = 0
+    nearest_rail_m: float | None = None
+    nearest_rail_name: str | None = None
 
     # Reverse geocoding
     rev_key = f"reverse:{lat},{lng}"
@@ -265,17 +288,38 @@ def infer_from_google(
         for index, place in enumerate(nb_payload.get("results", [])[:3]):
             name = place.get("name", "")
             vicinity = place.get("vicinity", "")
+            location = place.get("geometry", {}).get("location", {})
+            place_lat = location.get("lat")
+            place_lng = location.get("lng")
+            distance_m: float | None = None
+            if isinstance(place_lat, (int, float)) and isinstance(place_lng, (int, float)):
+                distance_m = haversine_m(lat_f, lng_f, float(place_lat), float(place_lng))
+                if nearest_rail_m is None or distance_m < nearest_rail_m:
+                    nearest_rail_m = distance_m
+                    nearest_rail_name = canonical_station_name(name) or name or None
+
             tokens = extract_station_tokens(name) + extract_station_tokens(vicinity)
             for token in tokens:
+                distance_bonus = 0
+                if distance_m is not None:
+                    if distance_m <= 3000:
+                        distance_bonus = 34
+                    elif distance_m <= 7000:
+                        distance_bonus = 26
+                    elif distance_m <= 15000:
+                        distance_bonus = 16
+                    elif distance_m <= 30000:
+                        distance_bonus = 8
+
                 add_score(
                     score_map,
                     source_map,
                     token,
-                    48 - index * 9,
+                    48 - index * 9 + distance_bonus,
                     f"google_nearby_{station_type}",
                 )
 
-    return score_map, source_map, api_calls
+    return score_map, source_map, api_calls, {"nearest_rail_m": nearest_rail_m, "nearest_rail_name": nearest_rail_name}
 
 
 def pick_best_station(
@@ -317,6 +361,8 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=0.08, help="API呼び出し間隔（秒）")
     parser.add_argument("--min-score", type=int, default=70, help="このスコア以上を採用")
     parser.add_argument("--sample", type=int, default=12, help="ログ表示サンプル件数")
+    parser.add_argument("--missing-label", type=str, default="", help="未補完時に設定する文言（例: 最寄り駅なし）")
+    parser.add_argument("--far-distance-km", type=float, default=30.0, help="最寄り鉄道駅がこの距離以上なら missing-label を付与")
     parser.add_argument("--dry-run", action="store_true", help="書き込みせずに推定結果を表示")
     parser.add_argument(
         "--no-google",
@@ -352,39 +398,82 @@ def main() -> int:
         "text_only": 0,
         "google_only": 0,
         "text+google": 0,
+        "missing_label": 0,
         "low_confidence": 0,
         "no_candidate": 0,
     }
     samples: list[str] = []
+    far_distance_m = max(0.0, args.far_distance_km) * 1000.0
 
     for index, row in enumerate(targets, start=1):
         text_scores, text_sources = infer_from_text(row)
 
         google_scores: dict[str, int] = {}
         google_sources: dict[str, set[str]] = {}
+        google_meta: dict[str, float | str | None] = {"nearest_rail_m": None, "nearest_rail_name": None}
         best = pick_best_station(text_scores, text_sources, {}, {})
 
         # テキスト抽出で十分な確度がある場合はAPIを呼ばない（コスト削減）
         need_google = use_google and (best is None or best[1] < args.min_score)
         if need_google:
-            g_scores, g_sources, new_calls = infer_from_google(row, api_key, cache, args.cache, args.delay)
+            g_scores, g_sources, new_calls, g_meta = infer_from_google(row, api_key, cache, args.cache, args.delay)
             google_scores = g_scores
             google_sources = g_sources
+            google_meta = g_meta
             api_calls += new_calls
 
         best = pick_best_station(text_scores, text_sources, google_scores, google_sources)
-        if not best:
-            unresolved += 1
-            method_counts["no_candidate"] += 1
-            continue
+        station = ""
+        score = -1
+        sources: set[str] = set()
+        if best:
+            station, score, sources = best
 
-        station, score, sources = best
+        if not best or score < args.min_score:
+            # no/far 鉄道駅なら missing-label を許容する
+            fallback_assigned = False
+            if args.missing_label and use_google:
+                nearest_rail_m = google_meta.get("nearest_rail_m")
+                nearest_rail_name = str(google_meta.get("nearest_rail_name") or "")
+                if nearest_rail_m is None or (
+                    isinstance(nearest_rail_m, (int, float)) and nearest_rail_m >= far_distance_m
+                ):
+                    fallback_assigned = True
+                    inferred += 1
+                    method_counts["missing_label"] += 1
+                    if len(samples) < args.sample:
+                        if nearest_rail_m is None:
+                            samples.append(
+                                f"- [MISSING] {row.get('施設名','')} -> {args.missing_label} / reason=no_rail_station"
+                            )
+                        else:
+                            samples.append(
+                                f"- [MISSING] {row.get('施設名','')} -> {args.missing_label} "
+                                f"/ nearest={nearest_rail_name or '不明'} ({nearest_rail_m/1000:.1f}km)"
+                            )
+                    if not args.dry_run:
+                        row["最寄駅"] = args.missing_label
 
-        if score < args.min_score:
+            if fallback_assigned:
+                if index % 100 == 0 or index == len(targets):
+                    print(
+                        f"[{index}/{len(targets)}] inferred={inferred} unresolved={unresolved} api_calls={api_calls}"
+                    )
+                    if not args.dry_run:
+                        write_csv(output_path, fieldnames, rows)
+                continue
+
             unresolved += 1
-            method_counts["low_confidence"] += 1
-            if len(samples) < args.sample:
-                samples.append(f"- [LOW {score}] {row.get('施設名','')} -> 候補: {station} / source={','.join(sorted(sources))}")
+            if not best:
+                method_counts["no_candidate"] += 1
+                if len(samples) < args.sample:
+                    samples.append(f"- [NO CANDIDATE] {row.get('施設名','')}")
+            else:
+                method_counts["low_confidence"] += 1
+                if len(samples) < args.sample:
+                    samples.append(
+                        f"- [LOW {score}] {row.get('施設名','')} -> 候補: {station} / source={','.join(sorted(sources))}"
+                    )
             continue
 
         has_text = any(s.startswith(("name", "details", "address", "geocode_address")) for s in sources)
@@ -423,6 +512,7 @@ def main() -> int:
         f"text_only={method_counts['text_only']}, "
         f"text+google={method_counts['text+google']}, "
         f"google_only={method_counts['google_only']}, "
+        f"missing_label={method_counts['missing_label']}, "
         f"low_confidence={method_counts['low_confidence']}, "
         f"no_candidate={method_counts['no_candidate']}"
     )
