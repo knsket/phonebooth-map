@@ -189,3 +189,17 @@ python3 scripts/geocode_improve.py              # 767件のみ再処理
 python3 scripts/fill_address.py --limit 10
 python3 scripts/fill_address.py
 ```
+
+### 最寄駅の空欄補完（Text抽出 + Google API）
+
+`最寄駅` が空の行だけを対象に、まず `施設名` / `設置場所詳細` から駅名を抽出し、
+不足分のみ Google API（Reverse Geocoding + Nearby Search）で補完します。
+
+```bash
+python3 scripts/fill_station.py --dry-run
+python3 scripts/fill_station.py --limit 50 --dry-run
+python3 scripts/fill_station.py
+```
+
+- APIを使わない確認: `python3 scripts/fill_station.py --dry-run --no-google`
+- 採用しきい値を上げる: `python3 scripts/fill_station.py --min-score 80`
