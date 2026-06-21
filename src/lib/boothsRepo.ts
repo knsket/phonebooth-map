@@ -44,24 +44,39 @@ function mapRow(r: any): Booth {
 
 export type BoothSource = 'supabase' | 'local';
 
+const SUPABASE_PAGE_SIZE = 1000;
+
+/** PostgREST の1リクエスト上限(1000件)を超える行をページングで全件取得する */
+async function fetchAllBoothRows(): Promise<any[]> {
+  if (!supabase) return [];
+
+  const rows: any[] = [];
+  for (let offset = 0; ; offset += SUPABASE_PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('booths')
+      .select('*')
+      .order('booth_id', { ascending: true })
+      .range(offset, offset + SUPABASE_PAGE_SIZE - 1);
+
+    if (error || !Array.isArray(data) || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < SUPABASE_PAGE_SIZE) break;
+  }
+  return rows;
+}
+
 /**
  * 全ブースを取得する(ハイブリッド)。
- * Supabaseが設定済みなら booths_nearby RPC を日本全域(半径3000km)で1回呼んで全件取得し、
+ * Supabaseが設定済みなら booths テーブルをページングで全件取得し、
  * 失敗時・未設定時はバンドル済みのローカルJSONにフォールバックする。
- * データ件数は約1,300件と小さいため、起動時に一括取得して以降はクライアント側で
- * 絞り込み/並び替えする方式(高速・オフライン耐性あり)。
+ * booths_nearby RPC は PostgREST の行数上限(1000件)の影響を受けるため、全件取得には使わない。
  */
 export async function fetchAllBooths(): Promise<{ booths: Booth[]; source: BoothSource }> {
   if (isSupabaseConfigured && supabase) {
     try {
-      const { data, error } = await supabase.rpc('booths_nearby', {
-        p_lat: 36.2,
-        p_lng: 138.2,
-        p_radius_m: 3_000_000,
-        p_limit: 5000,
-      });
-      if (!error && Array.isArray(data) && data.length > 0) {
-        const booths = data.map(mapRow).filter((b: Booth) => !isExcludedBrand(b.brand));
+      const rows = await fetchAllBoothRows();
+      if (rows.length > 0) {
+        const booths = rows.map(mapRow).filter((b: Booth) => !isExcludedBrand(b.brand));
         return { booths, source: 'supabase' };
       }
     } catch {

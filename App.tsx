@@ -23,6 +23,7 @@ import Paywall from './src/components/Paywall';
 import { useSubscription, planLabel, PlanId } from './src/lib/subscription';
 import { Booth, LOCAL_BOOTHS, fetchAllBooths, BoothSource } from './src/lib/boothsRepo';
 import { getBrandColor } from './src/lib/brands';
+import { searchBooths } from './src/lib/searchBooths';
 
 // 東京駅周辺
 const INITIAL_REGION = {
@@ -53,6 +54,8 @@ export default function App() {
   const pendingActionRef = useRef<null | (() => void)>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
+  // 検索実行後の結果(リスト表示の絞り込み用)。クリア時は null。
+  const [searchResults, setSearchResults] = useState<Booth[] | null>(null);
   const [selectedBooth, setSelectedBooth] = useState<Booth | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [filterBrand, setFilterBrand] = useState<string>('ALL');
@@ -149,6 +152,13 @@ export default function App() {
   // latitudeDelta/longitudeDelta は「表示範囲の全幅」なので、中心から半分(+10%の余白)が画面内。
   // これによりズーム拡大→件数減、縮小→件数増、と直感どおりに連動する。
   const visibleBooths = useMemo(() => {
+    // 検索中は画面範囲に関わらず検索結果をピン表示する(範囲外のヒットも見えるように)
+    if (searchResults) {
+      let list = searchResults;
+      if (filterBrand !== 'ALL') list = list.filter((b) => b.brand === filterBrand);
+      return list.slice(0, 300);
+    }
+
     let list = allBooths;
     if (filterBrand !== 'ALL') list = list.filter((b) => b.brand === filterBrand);
 
@@ -163,20 +173,24 @@ export default function App() {
         );
       })
       .slice(0, 300);
-  }, [allBooths, mapRegion, filterBrand, selectedBooth]);
+  }, [allBooths, mapRegion, filterBrand, selectedBooth, searchResults]);
 
-  // リスト表示用: ブランド絞り込み + アンカーから近い順
+  // リスト表示用: 検索結果 or ブランド絞り込み + アンカーから近い順
   const listBooths = useMemo(() => {
-    let list = allBooths;
+    let list = searchResults ?? allBooths;
     if (filterBrand !== 'ALL') list = list.filter((b) => b.brand === filterBrand);
-    return [...list]
-      .map((b) => ({
-        booth: b,
-        dist: distanceKm(listAnchor.latitude, listAnchor.longitude, b.latitude, b.longitude),
-      }))
-      .sort((a, b) => a.dist - b.dist)
-      .slice(0, 100);
-  }, [allBooths, filterBrand, listAnchor]);
+
+    const withDist = list.map((b) => ({
+      booth: b,
+      dist: distanceKm(listAnchor.latitude, listAnchor.longitude, b.latitude, b.longitude),
+    }));
+
+    if (searchResults) {
+      return withDist.slice(0, 200);
+    }
+
+    return withDist.sort((a, b) => a.dist - b.dist).slice(0, 100);
+  }, [allBooths, filterBrand, listAnchor, searchResults]);
 
   // 詳細シートを閉じる(ルート表示もリセット)
   const closeSheet = () => {
@@ -293,6 +307,17 @@ export default function App() {
     setRouteActive(true);
   };
 
+  // サブスクリプション管理(OSの管理画面へ)。アプリ内では解約できないため、ストアへ誘導する。
+  const manageSubscription = () => {
+    if (Platform.OS === 'ios') {
+      Linking.openURL('https://apps.apple.com/account/subscriptions');
+    } else if (Platform.OS === 'android') {
+      Linking.openURL('https://play.google.com/store/account/subscriptions');
+    } else {
+      Alert.alert('サブスクリプション管理', 'iOS / Android アプリのストア設定から管理・解約ができます。');
+    }
+  };
+
   // 外部のGoogleマップ徒歩ナビを開く(ターンバイターン)
   const openExternalWalkNav = (booth: Booth) => {
     const dest = `${booth.latitude},${booth.longitude}`;
@@ -383,25 +408,29 @@ export default function App() {
     }
   };
 
+  const clearSearch = () => {
+    setSearchQuery('');
+    setSearchResults(null);
+  };
+
   const handleSearch = () => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = searchQuery.trim();
     if (!q) return;
     Keyboard.dismiss();
 
-    const results = allBooths.filter(
-      (b) =>
-        b.address.toLowerCase().includes(q) ||
-        b.name.toLowerCase().includes(q) ||
-        b.station.toLowerCase().includes(q) ||
-        b.prefecture.toLowerCase().includes(q)
-    );
+    const results = searchBooths(allBooths, q);
 
     if (results.length === 0) {
+      setSearchResults(null);
       Alert.alert('検索結果', '該当するブースが見つかりませんでした。\n例：渋谷、大阪、新宿、CocoDesk など');
       return;
     }
+
+    // ブランドフィルタとの競合(検索結果が絞られて0件)を避けるため「すべて」に戻す
+    setFilterBrand('ALL');
+    setSearchResults(results);
     const target = results[0];
-    // マップなら対象を選択して開く / リストなら近い順に並べ替えるだけ
+    // マップなら対象を選択して開く / リストなら検索結果を表示
     moveTo(target.latitude, target.longitude, appMode === 'MAP' ? target : null);
   };
 
@@ -442,10 +471,16 @@ export default function App() {
             style={[styles.authPill, isPremium ? styles.authPillOn : styles.authPillOff]}
             onPress={() => {
               if (isPremium) {
-                Alert.alert('プレミアム会員', `現在のプラン: ${planLabel(entitlement.plan)}`, [
-                  { text: '解約する（デモ）', style: 'destructive', onPress: clear },
-                  { text: '閉じる', style: 'cancel' },
-                ]);
+                // 解約はOSのサブスク管理画面で行う(アプリ内では解約不可)。
+                const buttons: any[] = [
+                  { text: 'サブスクリプションを管理', onPress: manageSubscription },
+                ];
+                // デモ解約は開発ビルドのみ(本番ビルドでは __DEV__=false で非表示)
+                if (__DEV__) {
+                  buttons.push({ text: '解約する（デモ）', style: 'destructive', onPress: clear });
+                }
+                buttons.push({ text: '閉じる', style: 'cancel' });
+                Alert.alert('プレミアム会員', `現在のプラン: ${planLabel(entitlement.plan)}`, buttons);
               } else {
                 setPaywallContext(undefined);
                 setShowPaywall(true);
@@ -467,12 +502,16 @@ export default function App() {
             placeholder="住所・駅名・施設名で検索"
             placeholderTextColor="#9CA3AF"
             value={searchQuery}
-            onChangeText={setSearchQuery}
+            onChangeText={(t) => {
+              setSearchQuery(t);
+              // 入力を空にしたら検索結果も解除し、通常表示へ戻す
+              if (t.trim() === '') setSearchResults(null);
+            }}
             onSubmitEditing={handleSearch}
             returnKeyType="search"
           />
           {searchQuery ? (
-            <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={8}>
+            <TouchableOpacity onPress={clearSearch} hitSlop={8}>
               <Text style={styles.searchClear}>✕</Text>
             </TouchableOpacity>
           ) : null}
@@ -516,7 +555,11 @@ export default function App() {
             return (
               <TouchableOpacity
                 key={c.key}
-                onPress={() => setFilterBrand(c.key)}
+                onPress={() => {
+                  // ブランド絞り込みと検索は排他。フィルタを触ったら検索結果は解除する。
+                  if (searchResults) clearSearch();
+                  setFilterBrand(c.key);
+                }}
                 style={[styles.chip, active && { backgroundColor: color, borderColor: color }]}
                 activeOpacity={0.8}
               >
@@ -558,7 +601,11 @@ export default function App() {
             />
             <View style={styles.mapBadge} pointerEvents="none">
               <Text style={styles.mapBadgeText}>
-                {visibleBooths.length >= 300 ? 'この付近 300+ 件（拡大で絞り込み）' : `この付近 ${visibleBooths.length} 件`}
+                {searchResults
+                  ? `「${searchQuery.trim()}」の検索結果 ${visibleBooths.length}${visibleBooths.length >= 300 ? '+' : ''} 件`
+                  : visibleBooths.length >= 300
+                  ? 'この付近 300+ 件（拡大で絞り込み）'
+                  : `この付近 ${visibleBooths.length} 件`}
               </Text>
             </View>
             <TouchableOpacity style={styles.locBtn} onPress={handleGoToCurrentLocation} activeOpacity={0.85}>
@@ -569,7 +616,9 @@ export default function App() {
           <View style={styles.flex}>
             <View style={styles.listHeader}>
               <Text style={styles.listHeaderText}>
-                {filterBrand === 'ALL' ? '全ブランド' : filterBrand}・近い順 {listBooths.length} 件
+                {searchResults
+                  ? `「${searchQuery.trim()}」の検索結果 ${listBooths.length} 件`
+                  : `${filterBrand === 'ALL' ? '全ブランド' : filterBrand}・近い順 ${listBooths.length} 件`}
               </Text>
               <TouchableOpacity onPress={handleGoToCurrentLocation}>
                 <Text style={styles.listHeaderAction}>🎯 現在地から</Text>

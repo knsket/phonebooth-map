@@ -53,16 +53,25 @@ export default function BoothMap({
         onRegionChangeComplete={onRegionChange}
         showsUserLocation={true}
       >
-        {booths.map((booth) => (
-          <Marker
-            key={booth.id}
-            coordinate={{ latitude: booth.latitude, longitude: booth.longitude }}
-            title={booth.name}
-            description={booth.brand}
-            pinColor={getBrandColor(booth.brand)}
-            onPress={() => onSelectBooth(booth)}
-          />
-        ))}
+        {booths
+          // 座標が NaN / 範囲外のピンをネイティブへ渡すと iOS が起動時クラッシュするため除外する。
+          .filter(
+            (booth) =>
+              Number.isFinite(booth.latitude) &&
+              Number.isFinite(booth.longitude) &&
+              Math.abs(booth.latitude) <= 90 &&
+              Math.abs(booth.longitude) <= 180
+          )
+          .map((booth) => (
+            <Marker
+              key={booth.id}
+              coordinate={{ latitude: booth.latitude, longitude: booth.longitude }}
+              title={booth.name}
+              description={booth.brand}
+              pinColor={getBrandColor(booth.brand)}
+              onPress={() => onSelectBooth(booth)}
+            />
+          ))}
       </MapView>
     </View>
   );

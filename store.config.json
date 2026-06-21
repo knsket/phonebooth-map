@@ -1,0 +1,28 @@
+{
+  "configVersion": 0,
+  "apple": {
+    "categories": ["NAVIGATION", "PRODUCTIVITY"],
+    "info": {
+      "ja": {
+        "title": "フォンブース",
+        "subtitle": "全国のブースを地図で検索",
+        "description": "日本全国のフォンブース・テレワークブースを地図とリストで探せるアプリです。\n\nSTATION BOOTH、テレキューブ、CHATBOX、CocoDesk など主要ブランドの拠点を約1,300件掲載。現在地から近い順に表示し、住所・駅名・施設名で検索できます。\n\n【主な機能】\n・地図 / リスト表示\n・現在地から近い順の検索\n・ブランド別フィルター\n・徒歩ルート案内（プレミアム）\n・予約ページへのリンク（プレミアム）",
+        "keywords": [
+          "phone",
+          "booth",
+          "telework",
+          "map",
+          "地図",
+          "テレワーク",
+          "駅",
+          "空港",
+          "会議",
+          "テレキューブ",
+          "CocoDesk",
+          "CHATBOX"
+        ],
+        "privacyPolicyUrl": "https://www.oneofthem.jp/%E3%83%97%E3%83%A9%E3%82%A4%E3%83%90%E3%82%B7%E3%83%BC%E3%83%9D%E3%83%AA%E3%82%B7%E3%83%BC"
+      }
+    }
+  }
+}

@@ -1,14 +1,27 @@
-const googleMapsIosApiKey = process.env.GOOGLE_MAPS_IOS_API_KEY ?? '';
-const googleMapsAndroidApiKey = process.env.GOOGLE_MAPS_ANDROID_API_KEY ?? '';
+// Google Maps の「モバイル用」APIキーは bundle ID / package + SHA で制限された公開キーであり、
+// アプリバイナリに必ず埋め込まれる前提のもの(秘匿情報ではない)。
+// 以前 EAS の env 変数注入が効かずキー未注入で iOS が起動時クラッシュ(GMSServices)したため、
+// 確実性最優先でリテラルを既定値にし、env があれば上書きする方式に変更。
+const GOOGLE_MAPS_IOS_API_KEY_DEFAULT = 'AIzaSyCNvMNAo1f1PVzlseT9af2ztQBlntBbC3M';
+const GOOGLE_MAPS_ANDROID_API_KEY_DEFAULT = 'AIzaSyBNRcTLJfjUe2_JOyGlnM7U801fQ9wqUQk';
+
+const googleMapsIosApiKey = process.env.GOOGLE_MAPS_IOS_API_KEY || GOOGLE_MAPS_IOS_API_KEY_DEFAULT;
+const googleMapsAndroidApiKey =
+  process.env.GOOGLE_MAPS_ANDROID_API_KEY || GOOGLE_MAPS_ANDROID_API_KEY_DEFAULT;
+
+// 念のため: 何らかの理由でキーが空ならビルドを止める(無キーのままストア提出を防ぐ)
+if (!googleMapsIosApiKey || !googleMapsAndroidApiKey) {
+  throw new Error('[app.config] Google Maps API key is empty. Refusing to build.');
+}
 
 const PRIVACY_POLICY_URL =
   'https://www.oneofthem.jp/%E3%83%97%E3%83%A9%E3%82%A4%E3%83%90%E3%82%B7%E3%83%BC%E3%83%9D%E3%83%AA%E3%82%B7%E3%83%BC';
 
 /** @type {import('expo/config').ExpoConfig} */
 module.exports = {
-  name: 'フォンブースマップ',
+  name: 'フォンブース',
   slug: 'phonebooth-map',
-  version: '1.0.0',
+  version: '1.0.1',
   orientation: 'portrait',
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
@@ -66,7 +79,8 @@ module.exports = {
       googleMapsApiKey: googleMapsIosApiKey,
     },
     infoPlist: {
-      CFBundleDisplayName: 'フォンブースマップ',
+      CFBundleDisplayName: 'フォンブース',
+      ITSAppUsesNonExemptEncryption: false,
     },
     splash: {
       image: './assets/splash.png',

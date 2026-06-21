@@ -256,20 +256,26 @@ Deno.serve(async (req) => {
     expiresMs = Date.now() + days * 24 * 60 * 60 * 1000;
   } else if (platform === 'ios') {
     if (jws) {
+      let resolved = false;
+      // 本番: JWS の署名を Apple Root CA まで検証(環境はJWSのenvironmentで自動判定)
       if (strictVerify) {
-        // 本番: JWS の署名を Apple Root CA まで検証(環境はJWSのenvironmentで自動判定)
         try {
           const envHint = decodeStoreKitJws(jws)?.environment;
           const v = await verifyJwsStrict(jws, envHint);
-          if (!v.productId) return json({ active: false, error: 'jws missing productId' }, 402);
-          verifiedPlan = planFromProduct(v.productId);
-          expiresMs = v.expiresMs ?? null;
-          signatureVerified = true;
+          if (v.productId) {
+            verifiedPlan = planFromProduct(v.productId);
+            expiresMs = v.expiresMs ?? null;
+            signatureVerified = true;
+            resolved = true;
+          }
         } catch (e) {
-          return json({ active: false, error: 'jws verification failed: ' + String(e) }, 402);
+          // フェイルオープン: 検証に失敗しても購入者をブロックしない(デコードへフォールバック)。
+          // ログを残し、purchase_events.verified_signature=false で監視 → 安定後に fail-closed へ。
+          console.error('STRICT_VERIFY fallback (decode):', String(e));
         }
-      } else {
-        // サンドボックス動作確認用: デコードのみ(署名未検証)
+      }
+      // 署名検証できなかった/無効時はデコードで継続(従来動作)
+      if (!resolved) {
         const d = decodeStoreKitJws(jws);
         if (!d || !d.productId) return json({ active: false, error: 'invalid jws' }, 402);
         verifiedPlan = planFromProduct(d.productId);
