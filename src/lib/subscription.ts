@@ -157,6 +157,8 @@ export function useSubscription() {
   const [purchasing, setPurchasing] = useState(false);
   // 購入要求中のPromiseを、IAPのイベント(成功/失敗)で解決するためのブリッジ
   const pendingResolveRef = useRef<((ok: boolean) => void) | null>(null);
+  // ネイティブIAP接続状態。起動時クラッシュ回避のため、初期接続は遅延させる。
+  const iapConnectedRef = useRef(false);
 
   const applyEntitlement = useCallback((e: Entitlement) => {
     setEntitlement(e);
@@ -170,9 +172,11 @@ export function useSubscription() {
     if (resolve) resolve(ok);
   }, []);
 
-  // 起動時: ネイティブは IAP に接続し、実際の購読状態を反映。Webは Supabase の状態を反映。
-  useEffect(() => {
-    let cancelled = false;
+  // 起動直後の StoreKit 初期化でクラッシュする端末対策として、
+  // ネイティブIAPは「購入/復元時に初回接続」へ遅延する。
+  const connectNativeIap = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS === 'web' || !IAP_SUPPORTED) return false;
+    if (iapConnectedRef.current) return true;
 
     const handlePurchase = async (purchase: any) => {
       try {
@@ -195,23 +199,21 @@ export function useSubscription() {
       finishPending(false);
     };
 
+    try {
+      await iapConnect(ALL_PRODUCT_IDS, { onPurchase: handlePurchase, onError: handleError });
+      iapConnectedRef.current = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }, [applyEntitlement, finishPending]);
+
+  // 起動時: Webは Supabase の状態を反映。ネイティブはローカルキャッシュのみで開始する。
+  useEffect(() => {
+    let cancelled = false;
+
     (async () => {
-      if (Platform.OS !== 'web' && IAP_SUPPORTED) {
-        try {
-          await iapConnect(ALL_PRODUCT_IDS, { onPurchase: handlePurchase, onError: handleError });
-          const active = await iapGetActive(ALL_PRODUCT_IDS);
-          if (cancelled) return;
-          if (active.length > 0) {
-            const a = active[0];
-            applyEntitlement({
-              active: true,
-              plan: planFromProductId(a.productId),
-              expiresAt: a.expiresMs,
-            });
-          }
-        } catch {
-          /* 接続失敗時はローカルキャッシュのまま */
-        }
+      if (Platform.OS !== 'web') {
         return;
       }
 
@@ -230,16 +232,19 @@ export function useSubscription() {
 
     return () => {
       cancelled = true;
-      if (Platform.OS !== 'web' && IAP_SUPPORTED) {
+      if (Platform.OS !== 'web' && IAP_SUPPORTED && iapConnectedRef.current) {
+        iapConnectedRef.current = false;
         iapDisconnect();
       }
     };
-  }, [applyEntitlement, finishPending]);
+  }, [applyEntitlement]);
 
   const purchase = useCallback(
     async (planId: PlanId): Promise<boolean> => {
       // ネイティブ: 実際のストア課金(イベント方式)。結果は購入リスナーで確定。
       if (Platform.OS !== 'web' && IAP_SUPPORTED) {
+        const ready = await connectNativeIap();
+        if (!ready) return false;
         const productId = productIdForPlan(planId);
         if (!productId) return false;
         setPurchasing(true);
@@ -285,13 +290,15 @@ export function useSubscription() {
         setPurchasing(false);
       }
     },
-    [applyEntitlement, finishPending]
+    [applyEntitlement, connectNativeIap, finishPending]
   );
 
   // 購入の復元。ネイティブはストアの購読状態、WebはSupabaseの状態を反映。
   const restore = useCallback(async (): Promise<boolean> => {
     if (Platform.OS !== 'web' && IAP_SUPPORTED) {
       try {
+        const ready = await connectNativeIap();
+        if (!ready) return entitlement.active;
         const active = await iapGetActive(ALL_PRODUCT_IDS);
         if (active.length > 0) {
           const a = active[0];
@@ -325,7 +332,7 @@ export function useSubscription() {
     const local = loadEntitlement();
     setEntitlement(local);
     return local.active;
-  }, [applyEntitlement, entitlement.active]);
+  }, [applyEntitlement, connectNativeIap, entitlement.active]);
 
   // クーポンコードの適用(12ヶ月無料など)。サーバー(redeem_coupon)で検証し、成功時に反映。
   const redeemCoupon = useCallback(

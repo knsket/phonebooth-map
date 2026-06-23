@@ -44,6 +44,10 @@ export default function Paywall({
   const [redeeming, setRedeeming] = useState(false);
   const [couponResult, setCouponResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  // iPadOS 26 端末で起動時に ModalHostView が不安定になるケースを避けるため、
+  // 非表示時は Modal 自体をマウントしない。
+  if (!visible) return null;
+
   const handleRedeem = async () => {
     if (redeeming) return;
     setRedeeming(true);
@@ -289,7 +293,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#0F172A',
     marginRight: 8,
-    outlineStyle: 'none',
   } as any,
   couponBtn: {
     minWidth: 64,

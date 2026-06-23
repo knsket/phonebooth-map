@@ -123,8 +123,10 @@ export default function App() {
 
     (async () => {
       try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') return; // 許可なし → 東京駅のまま
+        // 起動直後に許可ダイアログを出すと審査端末で不安定になるケースがあるため、
+        // 既に許可されている場合のみ自動取得する。
+        const { status } = await Location.getForegroundPermissionsAsync();
+        if (status !== 'granted') return; // 未許可 → 東京駅のまま(必要時に明示操作で許可を求める)
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         applyLocation(loc.coords.latitude, loc.coords.longitude);
       } catch {
@@ -270,14 +272,10 @@ export default function App() {
     }
   };
 
-  // 「徒歩ルート」ボタン: プレミアム機能。Webは地図に線を描画、ネイティブは外部Googleマップ徒歩ナビ
+  // 「徒歩ルート」ボタン: プレミアム機能。現在地→ブースの徒歩ルートを地図上に線で描画する(Web/ネイティブ共通)。
   const handleRoutePress = (booth: Booth) => {
     // 未課金なら課金を促し、購入後にこの操作を自動継続
     if (!requirePremium('徒歩ルート案内', () => handleRoutePress(booth))) return;
-    if (Platform.OS !== 'web') {
-      openExternalWalkNav(booth);
-      return;
-    }
     if (routeActive) {
       setRouteActive(false); // トグルで消す
       setRouteInfo(null);
@@ -285,26 +283,54 @@ export default function App() {
     }
     setRouteInfo(null); // 新しい計算前にクリア
     setAppMode('MAP'); // ルートは地図上に描くので、リスト表示中でもマップへ切り替える
-    if (!userLocation) {
-      // 現在地のみ取得(選択ブースは維持)。取得後 routeActive=true なのでルートが描かれる。
-      setIsLoading(true);
+
+    // すでに現在地があればそのまま描画
+    if (userLocation) {
+      setRouteActive(true);
+      return;
+    }
+
+    // 現在地が未取得なら取得してから描画する(取得後 routeActive=true でルートが引かれる)
+    setIsLoading(true);
+    if (Platform.OS === 'web') {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           (pos) => {
             setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
             setIsLoading(false);
+            setRouteActive(true);
           },
           () => {
             setUserLocation({ latitude: 35.658034, longitude: 139.701636 }); // デモ用フォールバック(渋谷)
             setIsLoading(false);
+            setRouteActive(true);
           },
           { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
         );
       } else {
         setIsLoading(false);
       }
+      return;
     }
-    setRouteActive(true);
+
+    // ネイティブ: expo-location で現在地を取得してからルートを描画
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setIsLoading(false);
+          Alert.alert('位置情報が必要です', '徒歩ルートを表示するには現在地の許可が必要です。');
+          return;
+        }
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        setUserLocation({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+        setIsLoading(false);
+        setRouteActive(true);
+      } catch {
+        setIsLoading(false);
+        Alert.alert('現在地の取得に失敗しました', '電波の良い場所でもう一度お試しください。');
+      }
+    })();
   };
 
   // サブスクリプション管理(OSの管理画面へ)。アプリ内では解約できないため、ストアへ誘導する。
@@ -316,17 +342,6 @@ export default function App() {
     } else {
       Alert.alert('サブスクリプション管理', 'iOS / Android アプリのストア設定から管理・解約ができます。');
     }
-  };
-
-  // 外部のGoogleマップ徒歩ナビを開く(ターンバイターン)
-  const openExternalWalkNav = (booth: Booth) => {
-    const dest = `${booth.latitude},${booth.longitude}`;
-    const origin = userLocation ? `${userLocation.latitude},${userLocation.longitude}` : '';
-    const url =
-      `https://www.google.com/maps/dir/?api=1${origin ? `&origin=${origin}` : ''}` +
-      `&destination=${dest}&travelmode=walking`;
-    if (Platform.OS === 'web') window.open(url, '_blank');
-    else Linking.openURL(url);
   };
 
   // ブース選択: 詳細を開き、マップなら「見える範囲の中央」へ移動。リストの並びは変えない(listAnchorは触らない)。
@@ -687,11 +702,8 @@ export default function App() {
             </TouchableOpacity>
           </View>
           <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.navBtnWide} onPress={() => openExternalWalkNav(selectedBooth)} activeOpacity={0.9}>
-              <Text style={styles.navBtnText}>Googleマップで案内</Text>
-            </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.bookBtnSm, { backgroundColor: getBrandColor(selectedBooth.brand) }]}
+              style={[styles.bookBtnSm, { flex: 1, backgroundColor: getBrandColor(selectedBooth.brand) }]}
               onPress={() => handleOpenBooking(selectedBooth)}
               activeOpacity={0.9}
             >
@@ -753,6 +765,10 @@ export default function App() {
                   </View>
                 );
               })()}
+
+              <Text style={styles.sheetDisclaimer}>
+                スポットは運営社によって予告なく価格変更・閉鎖・移動・停止する場合がございます。最新のスポット情報は運営社サイトや予約ページを御確認ください。
+              </Text>
             </ScrollView>
 
             {/* 道案内・予約アクション */}
@@ -765,20 +781,10 @@ export default function App() {
                 <Text style={[styles.routeBtnText, routeActive && styles.routeBtnTextActive]}>
                   {!isPremium
                     ? '🔒 徒歩ルート'
-                    : Platform.OS === 'web'
-                    ? (routeActive ? '🧭 ルートを消す' : '🧭 徒歩ルート')
-                    : '🧭 徒歩でナビ'}
+                    : routeActive
+                    ? '🧭 ルートを消す'
+                    : '🧭 徒歩ルート'}
                 </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.navBtn}
-                onPress={() => {
-                  if (!requirePremium('徒歩ルート案内', () => openExternalWalkNav(selectedBooth))) return;
-                  openExternalWalkNav(selectedBooth);
-                }}
-                activeOpacity={0.9}
-              >
-                <Text style={styles.navBtnText}>Googleマップ</Text>
               </TouchableOpacity>
             </View>
 
@@ -872,7 +878,7 @@ const styles = StyleSheet.create({
     height: 46,
   },
   searchIcon: { fontSize: 14, marginRight: 6 },
-  searchInput: { flex: 1, fontSize: 14, color: '#0F172A', borderWidth: 0, outlineStyle: 'none' } as any,
+  searchInput: { flex: 1, fontSize: 14, color: '#0F172A', borderWidth: 0 } as any,
   searchClear: { color: '#94A3B8', fontSize: 13, paddingHorizontal: 8, fontWeight: '700' },
   searchGo: { backgroundColor: '#2563EB', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
   searchGoText: { color: '#fff', fontSize: 13, fontWeight: '700' },
@@ -1029,6 +1035,7 @@ const styles = StyleSheet.create({
   sheetInfoValue: { fontSize: 13, color: '#334155', lineHeight: 18 },
   walkInfo: { backgroundColor: '#EFF6FF', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, marginTop: 2 },
   walkInfoText: { fontSize: 12.5, color: '#1D4ED8', fontWeight: '700' },
+  sheetDisclaimer: { fontSize: 10.5, lineHeight: 15, color: '#94A3B8', marginTop: 14 },
   actionRow: { flexDirection: 'row', marginBottom: 10 },
   routeBtn: {
     flex: 1,
@@ -1044,17 +1051,6 @@ const styles = StyleSheet.create({
   routeBtnActive: { backgroundColor: '#2563EB' },
   routeBtnText: { color: '#2563EB', fontSize: 14, fontWeight: '800' },
   routeBtnTextActive: { color: '#fff' },
-  navBtn: {
-    width: 130,
-    height: 46,
-    borderRadius: 13,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#F1F5F9',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  navBtnText: { color: '#334155', fontSize: 13, fontWeight: '700' },
   bookBtn: { height: 50, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   bookBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
 
@@ -1082,17 +1078,6 @@ const styles = StyleSheet.create({
   routeBarEst: { fontSize: 12, fontWeight: '700', color: '#1D4ED8', marginTop: 2 },
   routeBarClose: { backgroundColor: '#F1F5F9', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 8, marginLeft: 10 },
   routeBarCloseText: { fontSize: 12, fontWeight: '800', color: '#475569' },
-  navBtnWide: {
-    flex: 1,
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#F1F5F9',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    marginRight: 8,
-  },
   bookBtnSm: { width: 110, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   bookBtnSmText: { color: '#fff', fontSize: 14, fontWeight: '800' },
 
