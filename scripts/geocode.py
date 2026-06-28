@@ -129,6 +129,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="処理件数上限（0=全件）")
     parser.add_argument("--delay", type=float, default=0.1, help="API呼び出し間隔（秒）")
     parser.add_argument("--dry-run", action="store_true", help="APIを呼ばずクエリだけ表示")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="緯度・経度・ジオコードステータスOKの行はスキップ",
+    )
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -170,6 +175,15 @@ def main() -> int:
     api_calls = 0
 
     for index, row in enumerate(target_rows, start=1):
+        if args.skip_existing:
+            if (
+                row.get("緯度", "").strip()
+                and row.get("経度", "").strip()
+                and row.get("ジオコードステータス", "").strip() == "OK"
+            ):
+                ok_count += 1
+                continue
+
         query = build_geocode_query(row)
         row["ジオコードクエリ"] = query
 

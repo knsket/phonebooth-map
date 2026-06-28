@@ -24,6 +24,7 @@ import { useSubscription, planLabel, PlanId } from './src/lib/subscription';
 import { Booth, LOCAL_BOOTHS, fetchAllBooths, BoothSource } from './src/lib/boothsRepo';
 import { getBrandColor } from './src/lib/brands';
 import { searchBooths } from './src/lib/searchBooths';
+import { SUBSCRIPTION_MANAGE_URL } from './src/lib/subscriptionManageUrl';
 
 // 東京駅周辺
 const INITIAL_REGION = {
@@ -32,6 +33,10 @@ const INITIAL_REGION = {
   latitudeDelta: 0.02,
   longitudeDelta: 0.02,
 };
+
+// ピン選択時、対象を「中央より少し上」に置くための南方向シフト量(緯度幅比)。
+// 下のモーダルで隠れない位置にピンを表示するために中心を南へずらす。
+const SELECT_UP_SHIFT = 0.22;
 
 // 2点間の距離(おおまかなkm。表示用)
 const distanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
@@ -46,7 +51,7 @@ const distanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
 
 export default function App() {
   // サブスクリプション(課金)状態。徒歩案内・予約リンクをアンロックする。
-  const { entitlement, purchasing, purchase, restore, clear, redeemCoupon } = useSubscription();
+  const { entitlement, purchasing, purchase, restore, clear } = useSubscription();
   const isPremium = entitlement.active;
   const [showPaywall, setShowPaywall] = useState(false);
   const [paywallContext, setPaywallContext] = useState<string | undefined>(undefined);
@@ -64,6 +69,8 @@ export default function App() {
   const [routeActive, setRouteActive] = useState(false);
   // 実ルートの距離・時間(歩行者ルーティングの結果)
   const [routeInfo, setRouteInfo] = useState<{ mode: string; meters: number | null; seconds: number | null } | null>(null);
+  // 詳細シートの表示サイズ（縮小: 地図優先 / 展開: 詳細スクロール）
+  const [sheetExpanded, setSheetExpanded] = useState(false);
 
   // ブースデータ(Supabase優先・ローカルfallback)。初期はバンドル済みローカルで即描画し、取得後に差し替える。
   const [allBooths, setAllBooths] = useState<Booth[]>(LOCAL_BOOTHS);
@@ -151,7 +158,8 @@ export default function App() {
   }, [allBooths]);
 
   // マップ表示用: 実際に画面に映っている範囲 + ブランド絞り込み。
-  // latitudeDelta/longitudeDelta は「表示範囲の全幅」なので、中心から半分(+10%の余白)が画面内。
+  // latitudeDelta/longitudeDelta は「表示範囲の全幅」なので、中心から半分が画面内。
+  // 余白を持たせず実表示範囲ちょうどで判定し、「この付近 N件」と画面のピンを一致させる。
   // これによりズーム拡大→件数減、縮小→件数増、と直感どおりに連動する。
   const visibleBooths = useMemo(() => {
     // 検索中は画面範囲に関わらず検索結果をピン表示する(範囲外のヒットも見えるように)
@@ -164,8 +172,8 @@ export default function App() {
     let list = allBooths;
     if (filterBrand !== 'ALL') list = list.filter((b) => b.brand === filterBrand);
 
-    const thLat = (mapRegion.latitudeDelta / 2) * 1.1;
-    const thLng = (mapRegion.longitudeDelta / 2) * 1.1;
+    const thLat = mapRegion.latitudeDelta / 2;
+    const thLng = mapRegion.longitudeDelta / 2;
     return list
       .filter((b) => {
         if (selectedBooth && selectedBooth.id === b.id) return true;
@@ -199,6 +207,7 @@ export default function App() {
     setSelectedBooth(null);
     setRouteActive(false);
     setRouteInfo(null);
+    setSheetExpanded(false);
   };
 
   // 現在地→ブースの徒歩時間/距離の目安(直線ベース)
@@ -242,20 +251,6 @@ export default function App() {
     InteractionManager.runAfterInteractions(() => {
       setTimeout(() => completePurchase(planId), 450);
     });
-  };
-
-  // クーポン適用。成功したらペイウォールを閉じ、保留中の操作を続行する。
-  const handleRedeemCoupon = async (code: string) => {
-    const result = await redeemCoupon(code);
-    if (result.success) {
-      const next = pendingActionRef.current;
-      pendingActionRef.current = null;
-      setTimeout(() => {
-        setShowPaywall(false);
-        if (next) setTimeout(next, 250);
-      }, 900); // 成功メッセージを一瞬見せてから閉じる
-    }
-    return result;
   };
 
   const handleRestore = async () => {
@@ -335,13 +330,11 @@ export default function App() {
 
   // サブスクリプション管理(OSの管理画面へ)。アプリ内では解約できないため、ストアへ誘導する。
   const manageSubscription = () => {
-    if (Platform.OS === 'ios') {
-      Linking.openURL('https://apps.apple.com/account/subscriptions');
-    } else if (Platform.OS === 'android') {
-      Linking.openURL('https://play.google.com/store/account/subscriptions');
-    } else {
-      Alert.alert('サブスクリプション管理', 'iOS / Android アプリのストア設定から管理・解約ができます。');
+    if (!SUBSCRIPTION_MANAGE_URL) {
+      Alert.alert('サブスクリプション管理', '端末のアプリストア設定から管理・解約ができます。');
+      return;
     }
+    Linking.openURL(SUBSCRIPTION_MANAGE_URL);
   };
 
   // ブース選択: 詳細を開き、マップなら「見える範囲の中央」へ移動。リストの並びは変えない(listAnchorは触らない)。
@@ -349,14 +342,16 @@ export default function App() {
     setSelectedBooth(booth);
     setRouteActive(false); // 別のブースを選んだらルートは一旦消す
     setRouteInfo(null);
+    setSheetExpanded(false);
     if (Platform.OS === 'web') {
-      // Web: 中央寄せ(詳細シート分の上寄せ)は地図側のFOCUS_BOOTHが担当。二重移動を避けここでは中心移動しない。
+      // Web: 中心移動は地図側の FOCUS_BOOTH(=focusBooth) が単独で担当する。
+      // ここで setMapRegion すると SET_CENTER と取り合って移動が打ち消されるため何もしない。
       return;
     }
-    // ネイティブ: 詳細シートで画面下半分が隠れるぶん、中心を南へずらしてピンを上寄り＝見える範囲の中央に表示。
+    // ネイティブ: 詳細シートぶんだけ中心を南へずらし、ピンを「中央より少し上」に表示。
     const region = {
       ...mapRegion,
-      latitude: booth.latitude - mapRegion.latitudeDelta * 0.2,
+      latitude: booth.latitude - mapRegion.latitudeDelta * SELECT_UP_SHIFT,
       longitude: booth.longitude,
     };
     setMapRegion(region);
@@ -444,9 +439,11 @@ export default function App() {
     // ブランドフィルタとの競合(検索結果が絞られて0件)を避けるため「すべて」に戻す
     setFilterBrand('ALL');
     setSearchResults(results);
-    const target = results[0];
-    // マップなら対象を選択して開く / リストなら検索結果を表示
-    moveTo(target.latitude, target.longitude, appMode === 'MAP' ? target : null);
+    setSelectedBooth(null);
+    setRouteActive(false);
+    setRouteInfo(null);
+    setAppMode('LIST');
+    // 検索時点ではマップを動かさず、リストで選んだ施設へ移動する。
   };
 
   const handleOpenBooking = (booth: Booth) => {
@@ -644,7 +641,11 @@ export default function App() {
                 <TouchableOpacity
                   key={booth.id}
                   style={[styles.card, selectedBooth?.id === booth.id && styles.cardActive]}
-                  onPress={() => handleSelectBooth(booth)}
+                  onPress={() => {
+                    // 検索結果リストから選んだら、詳細は開かずに対象地点へ移動してマップへ戻す。
+                    setAppMode('MAP');
+                    moveTo(booth.latitude, booth.longitude, null);
+                  }}
                   activeOpacity={0.85}
                 >
                   <View style={styles.cardTop}>
@@ -716,9 +717,11 @@ export default function App() {
       {/* ===== 詳細ボトムシート(通常時) ===== */}
       {selectedBooth && !routeActive && (
         <>
-          <Pressable style={styles.sheetBackdrop} onPress={closeSheet} />
-          <View style={styles.sheet}>
-            <View style={styles.sheetHandle} />
+          {sheetExpanded && <Pressable style={styles.sheetBackdrop} onPress={closeSheet} />}
+          <View style={[styles.sheet, sheetExpanded && styles.sheetExpanded]}>
+            <View style={styles.sheetTopRow}>
+              <View style={styles.sheetHandle} />
+            </View>
             <View style={styles.sheetHead}>
               <View style={[styles.brandTag, { backgroundColor: getBrandColor(selectedBooth.brand) }]}>
                 <Text style={styles.brandTagText}>{selectedBooth.brand}</Text>
@@ -729,74 +732,120 @@ export default function App() {
                 </View>
               )}
               <View style={styles.flex} />
+              <TouchableOpacity
+                style={styles.sheetResizeBtn}
+                onPress={() => setSheetExpanded((prev) => !prev)}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.sheetResizeBtnText}>{sheetExpanded ? '縮小' : '拡大'}</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={styles.sheetClose} onPress={closeSheet} hitSlop={8}>
                 <Text style={styles.sheetCloseText}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.sheetBody} showsVerticalScrollIndicator={false}>
-              <Text style={styles.sheetName}>{selectedBooth.name}</Text>
-              <Text style={styles.sheetStation}>🚉 {selectedBooth.station || '最寄駅情報なし'}</Text>
-              <Text style={styles.sheetAddr}>📍 {selectedBooth.address}</Text>
-              {!!selectedBooth.details && (
-                <View style={styles.sheetNote}>
-                  <Text style={styles.sheetNoteText}>{selectedBooth.details}</Text>
-                </View>
-              )}
-              <View style={styles.sheetInfoRow}>
-                <Text style={styles.sheetInfoLabel}>🕒 営業時間</Text>
-                <Text style={styles.sheetInfoValue}>{selectedBooth.hours || '情報なし'}</Text>
-              </View>
-              <View style={styles.sheetInfoRow}>
-                <Text style={styles.sheetInfoLabel}>💰 料金</Text>
-                <Text style={styles.sheetInfoValue}>{selectedBooth.price || '情報なし'}</Text>
-              </View>
+            <Text style={styles.sheetName} numberOfLines={sheetExpanded ? undefined : 1}>
+              {selectedBooth.name}
+            </Text>
+            <Text style={styles.sheetStation} numberOfLines={1}>🚉 {selectedBooth.station || '最寄駅情報なし'}</Text>
 
-              {/* 現在地からの徒歩目安 */}
-              {(() => {
-                const est = walkEstimate(selectedBooth);
-                return (
-                  <View style={styles.walkInfo}>
-                    <Text style={styles.walkInfoText}>
-                      {est
-                        ? `🚶 現在地から 徒歩 約${est.minutes}分（${est.distLabel}・直線目安）`
-                        : '🚶 「現在地」を取得すると、ここまでの徒歩時間が表示されます'}
-                    </Text>
+            {sheetExpanded ? (
+              <ScrollView style={styles.sheetBody} showsVerticalScrollIndicator={true}>
+                <Text style={styles.sheetAddr}>📍 {selectedBooth.address}</Text>
+                {!!selectedBooth.details && (
+                  <View style={styles.sheetNote}>
+                    <Text style={styles.sheetNoteText}>{selectedBooth.details}</Text>
                   </View>
-                );
-              })()}
+                )}
+                <View style={styles.sheetInfoRow}>
+                  <Text style={styles.sheetInfoLabel}>🕒 営業時間</Text>
+                  <Text style={styles.sheetInfoValue}>{selectedBooth.hours || '情報なし'}</Text>
+                </View>
+                <View style={styles.sheetInfoRow}>
+                  <Text style={styles.sheetInfoLabel}>💰 料金</Text>
+                  <Text style={styles.sheetInfoValue}>{selectedBooth.price || '情報なし'}</Text>
+                </View>
 
-              <Text style={styles.sheetDisclaimer}>
-                スポットは運営社によって予告なく価格変更・閉鎖・移動・停止する場合がございます。最新のスポット情報は運営社サイトや予約ページを御確認ください。
-              </Text>
-            </ScrollView>
+                {/* 現在地からの徒歩目安 */}
+                {(() => {
+                  const est = walkEstimate(selectedBooth);
+                  return (
+                    <View style={styles.walkInfo}>
+                      <Text style={styles.walkInfoText}>
+                        {est
+                          ? `🚶 現在地から 徒歩 約${est.minutes}分（${est.distLabel}・直線目安）`
+                          : '🚶 「現在地」を取得すると、ここまでの徒歩時間が表示されます'}
+                      </Text>
+                    </View>
+                  );
+                })()}
+
+                <Text style={styles.sheetDisclaimer}>
+                  スポットは運営社によって予告なく価格変更・閉鎖・移動・停止する場合がございます。最新のスポット情報は運営社サイトや予約ページを御確認ください。
+                </Text>
+              </ScrollView>
+            ) : (
+              <View style={styles.sheetCompactInfo}>
+                {(() => {
+                  const est = walkEstimate(selectedBooth);
+                  return (
+                    <Text style={styles.sheetCompactInfoText}>
+                      {est
+                        ? `🚶 徒歩 約${est.minutes}分（${est.distLabel}）`
+                        : '🚶 現在地を取得すると徒歩時間が表示されます'}
+                    </Text>
+                  );
+                })()}
+              </View>
+            )}
 
             {/* 道案内・予約アクション */}
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={[styles.routeBtn, routeActive && styles.routeBtnActive]}
-                onPress={() => handleRoutePress(selectedBooth)}
-                activeOpacity={0.9}
-              >
-                <Text style={[styles.routeBtnText, routeActive && styles.routeBtnTextActive]}>
-                  {!isPremium
-                    ? '🔒 徒歩ルート'
-                    : routeActive
-                    ? '🧭 ルートを消す'
-                    : '🧭 徒歩ルート'}
-                </Text>
-              </TouchableOpacity>
-            </View>
+            {sheetExpanded ? (
+              <>
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={[styles.routeBtn, styles.routeBtnSingle, routeActive && styles.routeBtnActive]}
+                    onPress={() => handleRoutePress(selectedBooth)}
+                    activeOpacity={0.9}
+                  >
+                    <Text style={[styles.routeBtnText, routeActive && styles.routeBtnTextActive]}>
+                      {!isPremium
+                        ? '🔒 徒歩ルート'
+                        : routeActive
+                        ? '🧭 ルートを消す'
+                        : '🧭 徒歩ルート'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
 
-            <TouchableOpacity
-              style={[styles.bookBtn, { backgroundColor: getBrandColor(selectedBooth.brand) }]}
-              onPress={() => handleOpenBooking(selectedBooth)}
-              activeOpacity={0.9}
-            >
-              <Text style={styles.bookBtnText}>
-                {isPremium ? '⚡ 予約サイトを開く' : '🔒 予約する（プレミアム機能）'}
-              </Text>
-            </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.bookBtn, { backgroundColor: getBrandColor(selectedBooth.brand) }]}
+                  onPress={() => handleOpenBooking(selectedBooth)}
+                  activeOpacity={0.9}
+                >
+                  <Text style={styles.bookBtnText}>
+                    {isPremium ? '⚡ 予約サイトを開く' : '🔒 予約する（プレミアム機能）'}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={[styles.routeBtn, styles.routeBtnCompact]}
+                  onPress={() => handleRoutePress(selectedBooth)}
+                  activeOpacity={0.9}
+                >
+                  <Text style={styles.routeBtnText}>{isPremium ? '🧭 徒歩ルート' : '🔒 徒歩ルート'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.bookBtnCompact, { backgroundColor: getBrandColor(selectedBooth.brand) }]}
+                  onPress={() => handleOpenBooking(selectedBooth)}
+                  activeOpacity={0.9}
+                >
+                  <Text style={styles.bookBtnCompactText}>{isPremium ? '⚡ 予約サイト' : '🔒 予約サイト'}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         </>
       )}
@@ -808,7 +857,6 @@ export default function App() {
         context={paywallContext}
         onPurchase={handlePurchase}
         onRestore={handleRestore}
-        onRedeemCoupon={handleRedeemCoupon}
         onClose={() => {
           setShowPaywall(false);
           pendingActionRef.current = null;
@@ -1010,7 +1058,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingBottom: Platform.OS === 'ios' ? 32 : 18,
     paddingTop: 8,
-    maxHeight: '62%',
     zIndex: 26,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -4 },
@@ -1018,16 +1065,35 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 16,
   },
-  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#E2E8F0', alignSelf: 'center', marginBottom: 12 },
+  sheetExpanded: { maxHeight: '68%' },
+  sheetTopRow: { justifyContent: 'center', alignItems: 'center', marginBottom: 8 },
+  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: '#E2E8F0', alignSelf: 'center' },
+  sheetResizeBtn: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginRight: 8,
+  },
+  sheetResizeBtnText: { fontSize: 12, fontWeight: '800', color: '#334155' },
   sheetHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   sheetCount: { backgroundColor: '#F1F5F9', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, marginLeft: 8 },
   sheetCountText: { fontSize: 11, color: '#475569', fontWeight: '700' },
   sheetClose: { backgroundColor: '#F1F5F9', width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   sheetCloseText: { color: '#94A3B8', fontSize: 13, fontWeight: '800' },
-  sheetBody: { marginBottom: 14 },
+  sheetBody: { marginBottom: 12 },
   sheetName: { fontSize: 19, fontWeight: '800', color: '#0F172A', marginBottom: 6 },
   sheetStation: { fontSize: 13, color: '#475569', marginBottom: 3 },
   sheetAddr: { fontSize: 13, color: '#64748B', marginBottom: 10 },
+  sheetCompactInfo: {
+    backgroundColor: '#EFF6FF',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  sheetCompactInfoText: { fontSize: 12, color: '#1D4ED8', fontWeight: '700' },
   sheetNote: { backgroundColor: '#F8FAFC', borderLeftWidth: 3, borderLeftColor: '#CBD5E1', padding: 11, borderRadius: 8, marginBottom: 12 },
   sheetNoteText: { fontSize: 12, color: '#475569', lineHeight: 18 },
   sheetInfoRow: { marginBottom: 10 },
@@ -1048,11 +1114,15 @@ const styles = StyleSheet.create({
     borderColor: '#2563EB',
     marginRight: 8,
   },
+  routeBtnSingle: { marginRight: 0 },
+  routeBtnCompact: { height: 44 },
   routeBtnActive: { backgroundColor: '#2563EB' },
   routeBtnText: { color: '#2563EB', fontSize: 14, fontWeight: '800' },
   routeBtnTextActive: { color: '#fff' },
   bookBtn: { height: 50, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
   bookBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  bookBtnCompact: { flex: 1, height: 44, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
+  bookBtnCompactText: { color: '#fff', fontSize: 13, fontWeight: '800' },
 
   // ルート表示中のコンパクト下部バー(地図を覆い隠さない)
   routeBar: {

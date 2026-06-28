@@ -46,6 +46,23 @@ export type BoothSource = 'supabase' | 'local';
 
 const SUPABASE_PAGE_SIZE = 1000;
 
+/**
+ * サーバー(Supabase)側で非表示指定されているブランド名の集合を取得する。
+ * これにより、アプリを再ビルドせずに Supabase の `brands` テーブルの `hidden` を
+ * 切り替えるだけで、地図・リスト・検索・フィルタから特定ブランドを出し分けできる。
+ * 取得失敗・未設定時は空集合(= サーバー側の非表示なし)。
+ */
+async function fetchHiddenBrands(): Promise<Set<string>> {
+  if (!supabase) return new Set();
+  try {
+    const { data, error } = await supabase.from('brands').select('name').eq('hidden', true);
+    if (error || !Array.isArray(data)) return new Set();
+    return new Set(data.map((r: any) => String(r.name)));
+  } catch {
+    return new Set();
+  }
+}
+
 /** PostgREST の1リクエスト上限(1000件)を超える行をページングで全件取得する */
 async function fetchAllBoothRows(): Promise<any[]> {
   if (!supabase) return [];
@@ -74,9 +91,11 @@ async function fetchAllBoothRows(): Promise<any[]> {
 export async function fetchAllBooths(): Promise<{ booths: Booth[]; source: BoothSource }> {
   if (isSupabaseConfigured && supabase) {
     try {
-      const rows = await fetchAllBoothRows();
+      const [rows, hiddenBrands] = await Promise.all([fetchAllBoothRows(), fetchHiddenBrands()]);
       if (rows.length > 0) {
-        const booths = rows.map(mapRow).filter((b: Booth) => !isExcludedBrand(b.brand));
+        const booths = rows
+          .map(mapRow)
+          .filter((b: Booth) => !isExcludedBrand(b.brand) && !hiddenBrands.has(b.brand));
         return { booths, source: 'supabase' };
       }
     } catch {
@@ -107,7 +126,10 @@ export async function fetchNearbyBooths(
         p_brand: brand ?? null,
       });
       if (!error && Array.isArray(data)) {
-        const booths = data.map(mapRow).filter((b: Booth) => !isExcludedBrand(b.brand));
+        const hiddenBrands = await fetchHiddenBrands();
+        const booths = data
+          .map(mapRow)
+          .filter((b: Booth) => !isExcludedBrand(b.brand) && !hiddenBrands.has(b.brand));
         return { booths, source: 'supabase' };
       }
     } catch {

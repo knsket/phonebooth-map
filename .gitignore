@@ -7,10 +7,21 @@ __pycache__/
 scripts/.geocode_cache.json
 scripts/.places_cache.json
 scripts/.reverse_geocode_cache.json
+scripts/.eoffice_cache.json
+scripts/.eoffice_cache_*.json
+scripts/.geocode_cache_*.json
+scripts/.reverse_geocode_cache_*.json
+scripts/.station_infer_cache_*.json
 node_modules
 dist/
 web-build/
 *.tsbuildinfo
+
+# ビルド成果物
+*.ipa
+*.apk
+*.aab
+build-*.ipa
 
 # expo prebuild / EAS Build が生成するネイティブプロジェクト（CNG）
 android/

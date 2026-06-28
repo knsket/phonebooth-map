@@ -21,7 +21,7 @@ const PRIVACY_POLICY_URL =
 module.exports = {
   name: 'フォンブース',
   slug: 'phonebooth-map',
-  version: '1.0.1',
+  version: '1.0.3',
   orientation: 'portrait',
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
@@ -33,6 +33,8 @@ module.exports = {
   },
   plugins: [
     './plugins/withKotlinMetadataFix',
+    './plugins/withSpotlightIndexing',
+    './plugins/withFmtConstevalFix',
     [
       'expo-build-properties',
       {

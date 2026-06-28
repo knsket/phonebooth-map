@@ -138,6 +138,7 @@ export default function BoothMap({
           let selectedMarkerId = null;
           let userMarker = null;
           let routeLayer = null;
+          let pendingCenter = null;
 
           // Valhallaのエンコード形状(精度6)をデコードする
           function decodePolyline(str, precision) {
@@ -226,8 +227,8 @@ export default function BoothMap({
                 className: 'user-loc-label'
               }).openTooltip();
             }
-            // 現在地が見つけやすいよう、その場所へ寄せて拡大する
-            map.setView([lat, lng], Math.max(map.getZoom(), 16));
+            // 現在地はマーカー更新のみ。ここで setView すると
+            // 検索→リスト→マップ遷移時の中心移動を上書きしてしまう。
           }
 
           // 現在の中心と「実際の表示範囲(bounds)」を親に通知する
@@ -248,6 +249,11 @@ export default function BoothMap({
           function initMap(lat, lng) {
             if (map) return;
             map = L.map('map', { zoomControl: false }).setView([lat, lng], 14);
+            // map初期化より先に中心変更メッセージが来ていた場合はここで反映
+            if (pendingCenter) {
+              map.setView(pendingCenter, 14);
+              pendingCenter = null;
+            }
             // ズーム(+/-)は左下へ。右下の「現在地」ボタンと重ならないようにする。
             L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
@@ -288,10 +294,13 @@ export default function BoothMap({
                 '<div style="font-size:11px; color:#4B5563;">🚉 ' + (booth.station || '情報なし') + '</div>' +
                 '</div>';
 
-              marker.bindPopup(popupContent);
+              // 中心移動は focusBooth で行うので、ポップアップ側の自動パンは無効化する
+              marker.bindPopup(popupContent, { autoPan: false, offset: [0, -10] });
 
               marker.on('click', () => {
-                // 中央寄せは親からの FOCUS_BOOTH で行う(下の詳細シートに隠れない位置へ)
+                // タップ時点で即フォーカスして、マーカーを「中央より少し上」に寄せる。
+                // その後、親へ選択イベントを通知してモーダルを表示。
+                focusBooth(booth.id, booth.lat, booth.lng);
                 window.parent.postMessage({ type: 'SELECT_BOOTH', id: booth.id }, '*');
               });
 
@@ -305,14 +314,16 @@ export default function BoothMap({
 
           // 中心位置変更
           function setCenter(lat, lng) {
-            if (map) {
-              const currentCenter = map.getCenter();
-              const distance = Math.sqrt(Math.pow(currentCenter.lat - lat, 2) + Math.pow(currentCenter.lng - lng, 2));
-              if (distance < 0.1) {
-                map.panTo([lat, lng]);
-              } else {
-                map.setView([lat, lng], map.getZoom());
-              }
+            if (!map) {
+              pendingCenter = [lat, lng];
+              return;
+            }
+            const currentCenter = map.getCenter();
+            const distance = Math.sqrt(Math.pow(currentCenter.lat - lat, 2) + Math.pow(currentCenter.lng - lng, 2));
+            if (distance < 0.1) {
+              map.panTo([lat, lng]);
+            } else {
+              map.setView([lat, lng], map.getZoom());
             }
           }
 
@@ -326,17 +337,17 @@ export default function BoothMap({
             }
           }
 
-          // スポットを「見える範囲(下の詳細シートを除いた領域)の中央」へ寄せる。
-          // 詳細シートが画面下部を覆うため、対象が上寄り(約32%位置)に来るよう中心をずらす。
+          // スポットを「中央より少し上」へ寄せる(下のモーダルに隠れない位置)。
+          // 中心を南へずらすことで、対象は画面の上寄り(約28%位置)に表示される。
           function focusBooth(id, lat, lng) {
             if (!map) return;
             selectedMarkerId = id;
             const z = map.getZoom();
             const size = map.getSize();
             const pt = map.project([lat, lng], z);
-            // 中心を対象より下へずらす → 対象は画面の上寄りに表示される
-            const target = map.unproject(L.point(pt.x, pt.y + size.y * 0.20), z);
-            map.panTo(target, { animate: true });
+            // 対象を「中央より少し上」に置く。下のモーダル分だけ中心を南へずらす。
+            const target = map.unproject(L.point(pt.x, pt.y + size.y * 0.22), z);
+            map.setView(target, z, { animate: true });
             const marker = markers[id];
             if (marker) marker.openPopup();
           }

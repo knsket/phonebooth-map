@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Platform, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 
 interface Booth {
@@ -89,8 +89,8 @@ export default function BoothMap({
   // 描画する徒歩ルートの座標列と、実ルート取得失敗時の直線フォールバックかどうか
   const [routeCoords, setRouteCoords] = useState<LatLng[]>([]);
   const [routeStraight, setRouteStraight] = useState(false);
-  // iOS は標準の Apple Maps を使い、Google Maps 初期化失敗の起動クラッシュ経路を回避する。
-  const mapProvider = Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined;
+  // iOS / Android とも Google Maps を使用する。
+  const mapProvider = PROVIDER_GOOGLE;
 
   // route(現在地→ブース)が指定されたら歩行者ルートを取得して線を引く。
   // Web 版と同じ Valhalla(OSM 歩行者ルーティング・APIキー不要)を使い、失敗時は直線にフォールバック。

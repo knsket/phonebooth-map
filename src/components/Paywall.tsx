@@ -3,7 +3,6 @@ import {
   Modal,
   View,
   Text,
-  TextInput,
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
@@ -12,7 +11,7 @@ import {
   Linking,
 } from 'react-native';
 import { PLANS, PlanId } from '../lib/subscription';
-import { PRIVACY_POLICY_URL, PUBLISHER_NAME } from '../constants/legal';
+import { PRIVACY_POLICY_URL, TERMS_OF_USE_URL, PUBLISHER_NAME } from '../constants/legal';
 
 interface PaywallProps {
   visible: boolean;
@@ -20,7 +19,6 @@ interface PaywallProps {
   context?: string; // どの機能をアンロックしようとしたか(例: 徒歩ルート案内)
   onPurchase: (planId: PlanId) => void;
   onRestore: () => void;
-  onRedeemCoupon: (code: string) => Promise<{ success: boolean; message: string }>;
   onClose: () => void;
 }
 
@@ -35,31 +33,13 @@ export default function Paywall({
   context,
   onPurchase,
   onRestore,
-  onRedeemCoupon,
   onClose,
 }: PaywallProps) {
   const [selected, setSelected] = useState<PlanId>('yearly');
-  const [showCoupon, setShowCoupon] = useState(false);
-  const [couponCode, setCouponCode] = useState('');
-  const [redeeming, setRedeeming] = useState(false);
-  const [couponResult, setCouponResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // iPadOS 26 端末で起動時に ModalHostView が不安定になるケースを避けるため、
   // 非表示時は Modal 自体をマウントしない。
   if (!visible) return null;
-
-  const handleRedeem = async () => {
-    if (redeeming) return;
-    setRedeeming(true);
-    setCouponResult(null);
-    try {
-      const result = await onRedeemCoupon(couponCode);
-      setCouponResult(result);
-      if (result.success) setCouponCode('');
-    } finally {
-      setRedeeming(false);
-    }
-  };
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -143,71 +123,26 @@ export default function Paywall({
               <Text style={styles.restoreText}>購入を復元する</Text>
             </TouchableOpacity>
 
-            {/* クーポンコード(法人配布など) */}
-            <View style={styles.couponWrap}>
-              {!showCoupon ? (
-                <TouchableOpacity
-                  style={styles.couponToggle}
-                  onPress={() => setShowCoupon(true)}
-                  disabled={purchasing}
-                >
-                  <Text style={styles.couponToggleText}>🎟 クーポンコードをお持ちの方</Text>
-                </TouchableOpacity>
-              ) : (
-                <View style={styles.couponBox}>
-                  <Text style={styles.couponLabel}>クーポンコードを入力</Text>
-                  <View style={styles.couponRow}>
-                    <TextInput
-                      style={styles.couponInput}
-                      placeholder="例: CORP-XXXX-2026"
-                      placeholderTextColor="#9CA3AF"
-                      value={couponCode}
-                      onChangeText={(t) => {
-                        setCouponCode(t);
-                        if (couponResult) setCouponResult(null);
-                      }}
-                      autoCapitalize="characters"
-                      autoCorrect={false}
-                      editable={!redeeming}
-                      onSubmitEditing={handleRedeem}
-                      returnKeyType="done"
-                    />
-                    <TouchableOpacity
-                      style={[styles.couponBtn, (redeeming || !couponCode.trim()) && styles.couponBtnDisabled]}
-                      onPress={handleRedeem}
-                      disabled={redeeming || !couponCode.trim()}
-                      activeOpacity={0.9}
-                    >
-                      {redeeming ? (
-                        <ActivityIndicator color="#fff" size="small" />
-                      ) : (
-                        <Text style={styles.couponBtnText}>適用</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                  {couponResult && (
-                    <Text style={[styles.couponMsg, couponResult.success ? styles.couponMsgOk : styles.couponMsgErr]}>
-                      {couponResult.success ? '✓ ' : '⚠ '}
-                      {couponResult.message}
-                    </Text>
-                  )}
-                  <Text style={styles.couponHint}>法人プランなどで配布されたコードをお使いいただけます。</Text>
-                </View>
-              )}
-            </View>
-
             <Text style={styles.legal}>
               ・サブスクリプションは選択した期間ごとに自動更新されます。{'\n'}
-              ・解約は App Store / Google Play のサブスクリプション管理からいつでも行えます。{'\n'}
+              ・解約は端末のサブスクリプション管理画面からいつでも行えます。{'\n'}
               ・提供: {PUBLISHER_NAME}
             </Text>
 
-            <TouchableOpacity
-              style={styles.privacyLink}
-              onPress={() => Linking.openURL(PRIVACY_POLICY_URL)}
-            >
-              <Text style={styles.privacyLinkText}>プライバシーポリシー</Text>
-            </TouchableOpacity>
+            <View style={styles.legalLinks}>
+              <TouchableOpacity
+                style={styles.legalLinkBtn}
+                onPress={() => Linking.openURL(PRIVACY_POLICY_URL)}
+              >
+                <Text style={styles.privacyLinkText}>プライバシーポリシー</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.legalLinkBtn}
+                onPress={() => Linking.openURL(TERMS_OF_USE_URL)}
+              >
+                <Text style={styles.privacyLinkText}>利用規約（EULA）</Text>
+              </TouchableOpacity>
+            </View>
 
             <TouchableOpacity style={styles.close} onPress={onClose} disabled={purchasing}>
               <Text style={styles.closeText}>あとで</Text>
@@ -274,43 +209,9 @@ const styles = StyleSheet.create({
   ctaText: { color: '#fff', fontSize: 16, fontWeight: '900' },
   restore: { alignItems: 'center', paddingVertical: 12 },
   restoreText: { color: '#2563EB', fontSize: 13, fontWeight: '700' },
-
-  couponWrap: { marginTop: 2, marginBottom: 4 },
-  couponToggle: { alignItems: 'center', paddingVertical: 8 },
-  couponToggleText: { color: '#64748B', fontSize: 13, fontWeight: '700' },
-  couponBox: { backgroundColor: '#F8FAFC', borderRadius: 14, padding: 14, borderWidth: 1, borderColor: '#E2E8F0' },
-  couponLabel: { fontSize: 12, fontWeight: '800', color: '#475569', marginBottom: 8 },
-  couponRow: { flexDirection: 'row', alignItems: 'center' },
-  couponInput: {
-    flex: 1,
-    height: 46,
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    borderRadius: 11,
-    paddingHorizontal: 12,
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#0F172A',
-    marginRight: 8,
-  } as any,
-  couponBtn: {
-    minWidth: 64,
-    height: 46,
-    borderRadius: 11,
-    backgroundColor: '#2563EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 14,
-  },
-  couponBtnDisabled: { opacity: 0.5 },
-  couponBtnText: { color: '#fff', fontSize: 14, fontWeight: '800' },
-  couponMsg: { fontSize: 12, fontWeight: '700', marginTop: 10, lineHeight: 17 },
-  couponMsgOk: { color: '#16A34A' },
-  couponMsgErr: { color: '#DC2626' },
-  couponHint: { fontSize: 10.5, color: '#94A3B8', marginTop: 8, lineHeight: 15 },
   legal: { fontSize: 10.5, color: '#94A3B8', lineHeight: 16, marginTop: 4, marginBottom: 4 },
-  privacyLink: { alignItems: 'center', paddingVertical: 6, marginBottom: 4 },
+  legalLinks: { alignItems: 'center', paddingVertical: 4, marginBottom: 4 },
+  legalLinkBtn: { paddingVertical: 6 },
   privacyLinkText: { color: '#2563EB', fontSize: 11.5, fontWeight: '700', textDecorationLine: 'underline' },
   close: { alignItems: 'center', paddingVertical: 10 },
   closeText: { color: '#94A3B8', fontSize: 14, fontWeight: '700' },

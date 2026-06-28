@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase, isSupabaseConfigured } from './supabase';
 import { getAppUserId } from './device';
 import {
@@ -22,7 +23,7 @@ import {
  *   - レシート検証: 取得したレシートを Supabase Edge Function へ送ってサーバー検証
  *   - 状態確定: 検証OKなら Entitlement を確定し、Supabase の購読テーブルと同期
  *
- * productId はストア(App Store / Google Play)に登録済みの商品IDに合わせること。
+ * productId はストアに登録済みの商品IDに合わせること。
  * price は表示用の暫定値。本番ではストアから取得したローカライズ価格を使う。
  */
 
@@ -67,8 +68,8 @@ export interface Entitlement {
 const EMPTY: Entitlement = { active: false, plan: null, expiresAt: null };
 const STORAGE_KEY = 'pb_entitlement';
 
-// デモ用の簡易永続化(Webのみ localStorage。ネイティブはメモリ保持)。
-// 本番では Supabase / SecureStore に置き換える。
+// 有料状態の永続化。Web=localStorage / ネイティブ=AsyncStorage。
+// これによりアプリ更新・再起動後も有料状態を維持し、手動リストアを不要にする。
 function loadEntitlement(): Entitlement {
   try {
     if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
@@ -81,10 +82,26 @@ function loadEntitlement(): Entitlement {
   return EMPTY;
 }
 
+// ネイティブ(AsyncStorage)からの非同期ロード。起動時の復元に使う。
+async function loadEntitlementNative(): Promise<Entitlement> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw) as Entitlement;
+  } catch {
+    /* ignore */
+  }
+  return EMPTY;
+}
+
 function saveEntitlement(e: Entitlement) {
   try {
-    if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(e));
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(e));
+      }
+    } else {
+      // ネイティブ: AsyncStorage に永続化(fire-and-forget)。失敗は無視。
+      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(e)).catch(() => {});
     }
   } catch {
     /* ignore */
@@ -208,12 +225,44 @@ export function useSubscription() {
     }
   }, [applyEntitlement, finishPending]);
 
-  // 起動時: Webは Supabase の状態を反映。ネイティブはローカルキャッシュのみで開始する。
+  // 起動時の有料状態復元。
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       if (Platform.OS !== 'web') {
+        // ネイティブ:
+        // 1) 端末キャッシュ(AsyncStorage)から即時復元。アプリ更新・再起動後も有料を維持し、
+        //    手動リストアを不要にする。
+        const cached = await loadEntitlementNative();
+        if (!cancelled && cached.active) setEntitlement(cached);
+
+        // 2) 背景でストア(StoreKit/Play)と照合して最新化。
+        //    起動直後の StoreKit 初期化クラッシュを避けるため遅延実行する。
+        //    取得失敗時はキャッシュを維持し、誤って降格しない(有料ユーザーをブロックしない)。
+        setTimeout(async () => {
+          if (cancelled) return;
+          const ready = await connectNativeIap();
+          if (!ready || cancelled) return;
+          try {
+            const active = await iapGetActive(ALL_PRODUCT_IDS);
+            if (cancelled) return;
+            if (active.length > 0) {
+              const a = active[0];
+              applyEntitlement({
+                active: true,
+                plan: planFromProductId(a.productId),
+                expiresAt: a.expiresMs,
+              });
+            } else if (cached.active && cached.expiresAt != null && cached.expiresAt < Date.now()) {
+              // ストアに有効な購読が無く、かつキャッシュも期限切れと確認できた時のみ降格
+              applyEntitlement(EMPTY);
+            }
+            // それ以外(ストアが一時的に空を返す等)はキャッシュ維持
+          } catch {
+            /* 取得失敗: キャッシュ維持 */
+          }
+        }, 3000);
         return;
       }
 
@@ -237,7 +286,7 @@ export function useSubscription() {
         iapDisconnect();
       }
     };
-  }, [applyEntitlement]);
+  }, [applyEntitlement, connectNativeIap]);
 
   const purchase = useCallback(
     async (planId: PlanId): Promise<boolean> => {
@@ -334,42 +383,6 @@ export function useSubscription() {
     return local.active;
   }, [applyEntitlement, connectNativeIap, entitlement.active]);
 
-  // クーポンコードの適用(12ヶ月無料など)。サーバー(redeem_coupon)で検証し、成功時に反映。
-  const redeemCoupon = useCallback(
-    async (code: string): Promise<{ success: boolean; message: string }> => {
-      const trimmed = (code ?? '').trim();
-      if (!trimmed) return { success: false, message: 'クーポンコードを入力してください。' };
-      if (!isSupabaseConfigured || !supabase) {
-        return { success: false, message: 'オンライン環境でのみクーポンを利用できます。' };
-      }
-      try {
-        const appUserId = await getAppUserId();
-        const { data, error } = await supabase.rpc('redeem_coupon', {
-          p_app_user_id: appUserId,
-          p_code: trimmed,
-          p_platform: Platform.OS,
-        });
-        if (error) return { success: false, message: 'クーポンの適用に失敗しました。時間をおいて再度お試しください。' };
-
-        const row = Array.isArray(data) ? data[0] : data;
-        if (!row || !row.success) {
-          return { success: false, message: row?.message ?? 'クーポンを適用できませんでした。' };
-        }
-
-        const next: Entitlement = {
-          active: true,
-          plan: row.plan === 'monthly' ? 'monthly' : 'yearly',
-          expiresAt: row.current_period_end ? new Date(row.current_period_end).getTime() : null,
-        };
-        applyEntitlement(next);
-        return { success: true, message: row.message ?? 'プレミアムが有効になりました。' };
-      } catch {
-        return { success: false, message: '通信エラーが発生しました。接続を確認してください。' };
-      }
-    },
-    [applyEntitlement]
-  );
-
   // 解約(デモ/将来のキャンセル処理)。Supabaseにも反映。
   const clear = useCallback(async () => {
     applyEntitlement(EMPTY);
@@ -383,5 +396,5 @@ export function useSubscription() {
     }
   }, [applyEntitlement]);
 
-  return { entitlement, purchasing, purchase, restore, clear, redeemCoupon };
+  return { entitlement, purchasing, purchase, restore, clear };
 }

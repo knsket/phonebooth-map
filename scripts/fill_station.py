@@ -55,7 +55,7 @@ MISSING_MARKERS = {
 
 STATION_PATTERN = re.compile(r"([A-Za-z0-9\u3040-\u30ff\u3400-\u9fffー\-]{1,24}駅)")
 AIRPORT_PATTERN = re.compile(r"([A-Za-z0-9\u3040-\u30ff\u3400-\u9fffー\-]{1,24}空港)")
-STOPWORDS = {"最寄駅", "最寄り駅", "情報なし", "駅", "空港"}
+STOPWORDS = {"最寄駅", "最寄り駅", "情報なし", "駅", "空港", "丁目駅"}
 
 TEXT_FIELD_WEIGHTS: list[tuple[str, str, int]] = [
     ("施設名", "name", 80),

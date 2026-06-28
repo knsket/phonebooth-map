@@ -41,6 +41,22 @@ const BRAND_ALIASES: Record<string, string[]> = {
   'EXPRESS WORK-Lounge': ['express', 'work', 'lounge', 'expresswork'],
 };
 
+// ゼロ件時のフォールバック検索で使う分解キーワード
+const FALLBACK_SPLIT_TOKENS = [
+  'タワー',
+  'ビル',
+  'ホテル',
+  'プラザ',
+  'センター',
+  'ステーション',
+  'オフィス',
+  'カフェ',
+  'ワーク',
+  'ブース',
+  '駅',
+  '空港',
+];
+
 /** 予約URLのスラッグを検索用テキストに(例: kushiro_airport → kushiroairport) */
 function urlSlugText(url: string): string {
   const m = url.match(/\/location\/([^/?#]+)/i) ?? url.match(/\/([^/?#]+)\/?$/);
@@ -63,6 +79,15 @@ function buildExtraSearchText(booth: Booth): string {
   return [urlSlugText(booth.url), latinParts(booth.name), latinParts(booth.station), brandAliasText(booth.brand)]
     .filter(Boolean)
     .join('');
+}
+
+function queryTermsFromInput(query: string): string[] {
+  const raw = query.normalize('NFKC').trim();
+  if (!raw) return [];
+  return raw
+    .split(/[\s\u3000]+/)
+    .map((part) => normalizeForSearch(part))
+    .filter(Boolean);
 }
 
 function expandQueryTokens(normalizedQuery: string): string[] {
@@ -95,23 +120,32 @@ function scoreField(normalizedQuery: string, fieldValue: string, weight: number)
   return 0;
 }
 
+function scoreBoothByToken(booth: Booth, token: string): number {
+  if (!token) return 0;
+  const extra = buildExtraSearchText(booth);
+  let score = 0;
+
+  for (const { key, weight } of SEARCH_FIELDS) {
+    score = Math.max(score, scoreField(token, String(booth[key] ?? ''), weight));
+  }
+
+  // URLスラッグ・英字部分・ブランド別名(英語入力向け)
+  if (extra) {
+    if (extra === token) score = Math.max(score, 90);
+    else if (extra.startsWith(token)) score = Math.max(score, 75);
+    else if (extra.includes(token)) score = Math.max(score, 55);
+  }
+
+  return score;
+}
+
 function scoreBooth(booth: Booth, queryTokens: string[]): number {
   let score = 0;
   const extra = buildExtraSearchText(booth);
 
   for (const token of queryTokens) {
     if (!token) continue;
-
-    for (const { key, weight } of SEARCH_FIELDS) {
-      score = Math.max(score, scoreField(token, String(booth[key] ?? ''), weight));
-    }
-
-    // URLスラッグ・英字部分・ブランド別名(英語入力向け)
-    if (extra) {
-      if (extra === token) score = Math.max(score, 90);
-      else if (extra.startsWith(token)) score = Math.max(score, 75);
-      else if (extra.includes(token)) score = Math.max(score, 55);
-    }
+    score = Math.max(score, scoreBoothByToken(booth, token));
   }
 
   // スペース区切りの複合語(例: 「釧路 空港」「kushiro airport」)
@@ -128,15 +162,100 @@ function scoreBooth(booth: Booth, queryTokens: string[]): number {
   return score;
 }
 
+function scoreBoothWithAndTerms(booth: Booth, termTokenGroups: string[][]): number {
+  let total = 0;
+
+  for (const tokenGroup of termTokenGroups) {
+    let bestScore = 0;
+    for (const token of tokenGroup) {
+      bestScore = Math.max(bestScore, scoreBoothByToken(booth, token));
+    }
+    if (bestScore <= 0) return 0; // 1語でも未一致ならAND不成立
+    total += bestScore;
+  }
+
+  // 複数語すべてを満たした候補を少し持ち上げる
+  return total + termTokenGroups.length * 20;
+}
+
+function fallbackSegments(normalizedQuery: string): string[] {
+  const tokens = new Set<string>([normalizedQuery]);
+
+  for (const splitToken of FALLBACK_SPLIT_TOKENS) {
+    const normalizedSplit = normalizeForSearch(splitToken);
+    const idx = normalizedQuery.indexOf(normalizedSplit);
+    if (idx <= 0) continue;
+
+    const left = normalizedQuery.slice(0, idx);
+    const right = normalizedQuery.slice(idx + normalizedSplit.length);
+
+    if (left.length >= 2) tokens.add(left);
+    tokens.add(normalizedSplit);
+    if (right.length >= 2) tokens.add(right);
+  }
+
+  // 英数字と日本語の境界で分割（例: "tower渋谷", "渋谷tower"）
+  const boundaryParts = normalizedQuery
+    .split(/(?<=[a-z0-9])(?=[ぁ-んァ-ヶー一-龠])|(?<=[ぁ-んァ-ヶー一-龠])(?=[a-z0-9])/)
+    .filter(Boolean);
+  for (const part of boundaryParts) {
+    if (part.length >= 2) tokens.add(part);
+  }
+
+  return [...tokens].sort((a, b) => b.length - a.length);
+}
+
+function fallbackScoreBooth(booth: Booth, segments: string[]): number {
+  const haystack = normalizeForSearch(
+    SEARCH_FIELDS.map(({ key }) => String(booth[key] ?? '')).join('') + buildExtraSearchText(booth)
+  );
+  if (!haystack) return 0;
+
+  let bestLen = 0;
+  let hits = 0;
+  for (const segment of segments) {
+    if (segment.length < 2) continue;
+    if (haystack.includes(segment)) {
+      bestLen = Math.max(bestLen, segment.length);
+      hits += 1;
+    }
+  }
+
+  if (bestLen === 0) return 0;
+  return bestLen * 100 + hits * 5;
+}
+
 /** ブース一覧を検索語の関連度順に返す */
 export function searchBooths(booths: Booth[], query: string): Booth[] {
-  const normalizedQuery = normalizeForSearch(query.trim());
-  if (!normalizedQuery) return [];
+  const terms = queryTermsFromInput(query);
+  if (terms.length === 0) return [];
+
+  // スペース区切りで複数語入力された場合は AND 検索
+  if (terms.length > 1) {
+    const termTokenGroups = terms.map((term) => expandQueryTokens(term));
+    return booths
+      .map((booth) => ({ booth, score: scoreBoothWithAndTerms(booth, termTokenGroups) }))
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score || a.booth.name.localeCompare(b.booth.name, 'ja'))
+      .map(({ booth }) => booth);
+  }
+
+  const normalizedQuery = terms[0];
 
   const queryTokens = expandQueryTokens(normalizedQuery);
-
-  return booths
+  const ranked = booths
     .map((booth) => ({ booth, score: scoreBooth(booth, queryTokens) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score || a.booth.name.localeCompare(b.booth.name, 'ja'));
+
+  if (ranked.length > 0) {
+    return ranked.map(({ booth }) => booth);
+  }
+
+  // ゼロ件時のみフォールバック検索（複合語や軽い入力ゆれを救済）
+  const segments = fallbackSegments(normalizedQuery);
+  return booths
+    .map((booth) => ({ booth, score: fallbackScoreBooth(booth, segments) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || a.booth.name.localeCompare(b.booth.name, 'ja'))
     .map(({ booth }) => booth);
